@@ -27,6 +27,7 @@ Thumbs.db
 # Editors
 .idea/
 .vscode/
+.claude/
 
 # Build artifacts
 *.egg
