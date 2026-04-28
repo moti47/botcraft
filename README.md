@@ -113,6 +113,7 @@ Run files **in order** in the Supabase SQL editor:
 | 004 | `004_platform_tokens.sql` | per-avatar OAuth tokens with expiry |
 | 005 | `005_avatar_extensions.sql` | `avatar_commands`, `avatar_files`, `face_url` |
 | 006 | `006_main_extensions.sql` | `notifications`, `push_subscriptions`, `avatar_ideas`, `chat_messages`; new `avatars` columns: `status`, `is_paused`, `auto_publish`, `avatar_style` |
+| 007 | `007_persona_variants_and_insights.sql` | `persona_variants` (A/B), `avatar_insights` (LLM cache), `script_consistency_checks`; `videos.persona_variant_id` |
 
 ---
 

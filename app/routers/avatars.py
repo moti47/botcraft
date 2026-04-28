@@ -173,9 +173,11 @@ async def duplicate_avatar(avatar_id: str, req: AvatarDuplicateRequest) -> Avata
 @router.post("/{avatar_id}/regenerate-image", response_model=RegenerateImageResponse)
 async def regenerate_image(
     avatar_id: str,
-    req: RegenerateImageRequest,
     background_tasks: BackgroundTasks,
+    req: RegenerateImageRequest | None = None,
 ) -> RegenerateImageResponse:
+    if req is None:
+        req = RegenerateImageRequest()
     """הפעל מחדש יצירת תמונת פנים — מחזיר placeholder מיד, מסיים ברקע."""
     row = await _get_avatar_or_404(avatar_id)
 

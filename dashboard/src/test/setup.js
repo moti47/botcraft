@@ -4,6 +4,11 @@ import { cleanup } from '@testing-library/react'
 
 afterEach(() => cleanup())
 
+// jsdom doesn't implement scrollIntoView — stub it on Element prototype
+if (typeof Element !== 'undefined' && !Element.prototype.scrollIntoView) {
+  Element.prototype.scrollIntoView = () => {}
+}
+
 // jsdom doesn't implement matchMedia / EventSource — stub them
 if (typeof window !== 'undefined') {
   if (!window.matchMedia) {

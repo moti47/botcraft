@@ -27,7 +27,7 @@ export const endpoints = {
   avatarCreate: (data) => api.post('/avatars/create', data),
   avatarUpdate: (id, data) => api.patch(`/avatars/${id}`, data),
   avatarDelete: (id) => api.delete(`/avatars/${id}`),
-  avatarRegenerateImage: (id) => api.post(`/avatars/${id}/regenerate-image`),
+  avatarRegenerateImage: (id, data = {}) => api.post(`/avatars/${id}/regenerate-image`, data),
   platformConnect: (id, data) => api.post(`/avatars/${id}/platforms/connect`, data),
   platformDisconnect: (id, platform) => api.delete(`/avatars/${id}/platforms/${platform}`),
   platformsList: (id) => api.get(`/avatars/${id}/platforms`),
