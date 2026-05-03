@@ -566,7 +566,22 @@ class VideoOrchestrator:
                 extra={"video_url": raw_video_url},
             )
 
-            # ---- שלב 6: יצירת thumbnail ייעודי (best-effort — לא מפיל pipeline) ----
+            # ---- שלב 6: העלאה ל-R2 לשמירת URL יציב (best-effort) ----
+            persistent_video_url = raw_video_url  # fallback: Colab URL
+            try:
+                from services.r2_uploader import upload_remote_url
+                persistent_video_url = await asyncio.wait_for(
+                    upload_remote_url(raw_video_url, key=f"videos/{video_db_id}.mp4"),
+                    timeout=300,
+                )
+                logger.info("orchestrator.video_uploaded_to_r2", video_id=video_db_id, url=persistent_video_url)
+            except Exception as exc:
+                logger.warning(
+                    "orchestrator.r2_upload_skipped",
+                    video_id=video_db_id, error=str(exc),
+                )
+
+            # ---- שלב 7: יצירת thumbnail ייעודי (best-effort — לא מפיל pipeline) ----
             thumbnail_url = face_url  # ברירת מחדל: תמונת הפנים
             try:
                 thumbnail_url = await asyncio.wait_for(
@@ -579,14 +594,14 @@ class VideoOrchestrator:
                     video_id=video_db_id, error=str(exc),
                 )
 
-            # ---- שלב 7: סימון הווידאו כמוכן ----
+            # ---- שלב 8: סימון הווידאו כמוכן ----
             await self._stamp(
                 video_db_id,
                 status=STATUS_READY,
-                extra={"video_url": raw_video_url, "thumbnail_url": thumbnail_url},
+                extra={"video_url": persistent_video_url, "thumbnail_url": thumbnail_url},
             )
 
-            # ---- שלב 8: auto_publish אם האווטאר מוגדר לפרסם אוטומטית ----
+            # ---- שלב 9: auto_publish אם האווטאר מוגדר לפרסם אוטומטית ----
             if avatar_row.get("auto_publish"):
                 try:
                     from app.routers.posts import _connected_tokens_for_avatar, _publish_to_platform, _persist_post_row
@@ -600,7 +615,7 @@ class VideoOrchestrator:
                             avatar_id=avatar_id,
                             tokens=tok,
                             video_row=final_row_for_publish,
-                            public_url=raw_video_url or "",
+                            public_url=persistent_video_url or "",
                             local_path=None,
                             caption=caption,
                             thumbnail_url=final_row_for_publish.get("thumbnail_url"),
@@ -617,7 +632,7 @@ class VideoOrchestrator:
                 except Exception as exc:
                     logger.warning("orchestrator.auto_publish_failed", error=str(exc))
 
-            # ---- שלב 9: החזרת רשומת הווידאו המלאה לקורא ----
+            # ---- שלב 10: החזרת רשומת הווידאו המלאה לקורא ----
             final = await get_row("videos", video_db_id)
             logger.info("orchestrator.produce.done", video_id=video_db_id, job_id=job_id)
             return final or {"id": video_db_id, "status": STATUS_READY}
