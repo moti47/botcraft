@@ -603,6 +603,7 @@ class VideoOrchestrator:
                             public_url=raw_video_url or "",
                             local_path=None,
                             caption=caption,
+                            thumbnail_url=final_row_for_publish.get("thumbnail_url"),
                         )
                         for platform, tok in tokens.items()
                     ]
