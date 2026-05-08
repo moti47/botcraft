@@ -1,9 +1,9 @@
 """יצירת אווטאר חדש: persona_dna → portrait → שמירה ב-Supabase.
 
-הזרימה החדשה (לאחר ה-refactor):
-  1. ה-LLM יוצר את persona_dna (כמו קודם).
+הזרימה:
+  1. ה-LLM יוצר את persona_dna.
   2. נבנה פרומפט פורטרייט מ-persona_dna.visual_style.
-  3. ImageClient (Colab) יוצר את הפרצוף בפועל.
+  3. Pollinations.ai (חינם, ללא API key) יוצר את הפרצוף בפועל.
   4. ה-bytes מועלים ל-Cloudflare R2 → URL ציבורי קבוע.
   5. שומרים שורת avatars עם face_url מאוכלס.
   6. מחזירים את האווטאר עם dna וגם face_url.

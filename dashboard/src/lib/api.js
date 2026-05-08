@@ -1,6 +1,14 @@
 import axios from 'axios'
+import { createClient } from '@supabase/supabase-js'
 
-export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+// Edge Functions URL (Supabase)
+export const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:54321/functions/v1'
+
+// Supabase client for direct DB access + realtime
+const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL || 'http://localhost:54321'
+const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...'
+
+export const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
 
 export const api = axios.create({
   baseURL: API_URL,
@@ -18,95 +26,125 @@ api.interceptors.response.use(
 )
 
 export const endpoints = {
-  health: () => api.get('/health'),
-  colabHealth: () => api.get('/colab/health'),
-  llmUsage: () => api.get('/llm/usage'),
+  // ===== Avatars (Supabase) =====
+  avatarsList: async () => {
+    const { data, error } = await supabase.from('avatars').select('*').order('created_at', { ascending: false })
+    if (error) throw error
+    return { data }
+  },
+  avatarGet: async (id) => {
+    const { data, error } = await supabase.from('avatars').select('*').eq('id', id).single()
+    if (error) throw error
+    return { data }
+  },
+  avatarCreate: async (data) => api.post('/create-avatar', data),
+  avatarUpdate: async (id, data) => {
+    const { error } = await supabase.from('avatars').update(data).eq('id', id)
+    if (error) throw error
+    return await endpoints.avatarGet(id)
+  },
 
-  avatarsList: () => api.get('/avatars'),
-  avatarGet: (id) => api.get(`/avatars/${id}`),
-  avatarCreate: (data) => api.post('/avatars/create', data),
-  avatarUpdate: (id, data) => api.patch(`/avatars/${id}`, data),
-  avatarDelete: (id) => api.delete(`/avatars/${id}`),
-  avatarRegenerateImage: (id, data = {}) => api.post(`/avatars/${id}/regenerate-image`, data),
-  platformConnect: (id, data) => api.post(`/avatars/${id}/platforms/connect`, data),
-  platformDisconnect: (id, platform) => api.delete(`/avatars/${id}/platforms/${platform}`),
-  platformsList: (id) => api.get(`/avatars/${id}/platforms`),
+  // ===== Videos (Edge Functions + Supabase) =====
+  videosList: async (params = {}) => {
+    let q = supabase.from('videos').select('*')
+    if (params.avatar_id) q = q.eq('avatar_id', params.avatar_id)
+    if (params.status) q = q.eq('status', params.status)
+    const { data, error } = await q.order('created_at', { ascending: false })
+    if (error) throw error
+    return { data }
+  },
+  videosRecent: async () => endpoints.videosList({ limit: 20 }),
+  videoProduce: (data) => api.post('/produce-video', data),
+  videoGet: async (id) => {
+    const { data, error } = await supabase.from('videos').select('*').eq('id', id).single()
+    if (error) throw error
+    return { data }
+  },
+  videoRetry: async (id) => {
+    const videoRes = await endpoints.videoGet(id)
+    const video = videoRes.data
+    const now = new Date().toISOString()
+    const renderOpts = video.render_options || {}
+    const newOpts = {
+      ...renderOpts,
+      stages: { ...(renderOpts.stages || {}), queued: now },
+      retry_count: (renderOpts.retry_count || 0) + 1,
+    }
+    const { error: updateErr } = await supabase.from('videos').update({
+      status: 'queued',
+      error_message: null,
+      render_options: newOpts,
+    }).eq('id', id)
+    if (updateErr) throw updateErr
+    await supabase.from('video_queue').insert([{
+      video_id: id,
+      avatar_id: video.avatar_id,
+      status: 'pending',
+      created_at: now,
+    }])
+    return { status: 'ok', video_id: id }
+  },
 
-  // Commands
-  commandsList: (id) => api.get(`/avatars/${id}/commands`),
-  commandCreate: (id, data) => api.post(`/avatars/${id}/commands`, data),
-  commandUpdate: (id, cmdId, data) => api.patch(`/avatars/${id}/commands/${cmdId}`, data),
-  commandDelete: (id, cmdId) => api.delete(`/avatars/${id}/commands/${cmdId}`),
+  // ===== Trends (Edge Functions) =====
+  findViralTopic: (avatarId, topN = 5) => api.post('/find-viral-topic', { avatar_id: avatarId, top_n: topN }),
+  trendsList: async (avatarId) => {
+    const now = new Date().toISOString()
+    const { data, error } = await supabase
+      .from('trend_signals')
+      .select('*')
+      .eq('avatar_id', avatarId)
+      .gt('expires_at', now)
+      .order('score', { ascending: false })
+    if (error) throw error
+    return { data }
+  },
 
-  // Files
-  filesList: (id) => api.get(`/avatars/${id}/files`),
-  fileUpload: (id, formData) => api.post(`/avatars/${id}/files`, formData, {
-    headers: { 'Content-Type': 'multipart/form-data' },
-    timeout: 600_000,
-  }),
-  fileUpdate: (id, fileId, data) => api.patch(`/avatars/${id}/files/${fileId}`, data),
-  fileDelete: (id, fileId) => api.delete(`/avatars/${id}/files/${fileId}`),
+  // ===== Learning / Insights =====
+  learnAll: () => api.post('/learn-all'),
+  insightsGet: async (avatarId) => {
+    const { data, error } = await supabase
+      .from('avatar_insights')
+      .select('*')
+      .eq('avatar_id', avatarId)
+      .order('generated_at', { ascending: false })
+      .limit(1)
+      .single()
+    if (error) throw error
+    return { data }
+  },
+  learningFactsList: async (avatarId) => {
+    const { data, error } = await supabase
+      .from('learning_facts')
+      .select('*')
+      .eq('avatar_id', avatarId)
+      .order('created_at', { ascending: false })
+    if (error) throw error
+    return { data }
+  },
 
-  // Scheduler
-  schedulerStatus: () => api.get('/scheduler/status'),
+  // ===== Chat =====
+  chatSend: async (message) => {
+    const { data, error } = await supabase
+      .from('chat_messages')
+      .insert([{ role: 'user', content: message }])
+      .select()
+      .single()
+    if (error) throw error
+    return { data }
+  },
+  chatHistory: async (limit = 30) => {
+    const { data, error } = await supabase
+      .from('chat_messages')
+      .select('*')
+      .order('created_at', { ascending: false })
+      .limit(limit)
+    if (error) throw error
+    return { data }
+  },
 
-  // Diagnostics
-  diagnostics: () => api.get('/admin/diagnostics'),
-  colabUrlsGet: () => api.get('/admin/colab-urls'),
-  colabUrlsSet: (data) => api.post('/admin/colab-urls', data),
-
-  videosList: (params) => api.get('/videos', { params }),
-  videosRecent: () => api.get('/videos/recent'),
-  videoProduce: (data) => api.post('/videos/produce', data),
-  videoGet: (id) => api.get(`/videos/${id}`),
-  videoDelete: (id) => api.delete(`/videos/${id}`),
-  videoRetry: (id) => api.post(`/videos/${id}/retry`),
-
-  postPublish: (data) => api.post('/posts/publish', data),
-
-  trends: () => api.get('/trends'),
-
-  analyticsSummary: (days = 7) => api.get('/analytics/summary', { params: { days } }),
-
-  configGet: () => api.get('/admin/config'),
-  configUpdate: (data) => api.post('/admin/config', data),
-
-  pauseAll: () => api.post('/admin/pause-all'),
-  clearQueue: () => api.post('/admin/clear-queue'),
-  exportData: () => api.get('/admin/export', { responseType: 'blob' }),
-
-  // Notifications (in-app + SSE + push)
-  notificationsList: (params) => api.get('/notifications', { params }),
-  notificationsUnreadCount: () => api.get('/notifications/unread-count'),
-  notificationMarkRead: (id) => api.post(`/notifications/${id}/read`),
-  notificationMarkAllRead: () => api.post('/notifications/read-all'),
-  notificationDelete: (id) => api.delete(`/notifications/${id}`),
-  notificationsPushSubscribe: (data) => api.post('/notifications/push/subscribe', data),
-  notificationsPushUnsubscribe: (data) => api.post('/notifications/push/unsubscribe', data),
-
-  // Ideas
-  ideasList: (avatarId) => api.get(`/avatars/${avatarId}/ideas`),
-  ideaCreate: (avatarId, data) => api.post(`/avatars/${avatarId}/ideas`, data),
-  ideaDelete: (avatarId, ideaId) => api.delete(`/avatars/${avatarId}/ideas/${ideaId}`),
-  ideaMarkUsed: (avatarId, ideaId) => api.post(`/avatars/${avatarId}/ideas/${ideaId}/use`),
-
-  // Duplicate
-  avatarDuplicate: (id, data) => api.post(`/avatars/${id}/duplicate`, data),
-
-  // Chat agent
-  chatSend: (message) => api.post('/chat', { message }),
-  chatHistory: (limit = 30) => api.get('/chat/history', { params: { limit } }),
-
-  // Insights
-  insightsGet: (avatarId) => api.get(`/avatars/${avatarId}/insights`),
-  insightsRefresh: (avatarId) => api.post(`/avatars/${avatarId}/insights/refresh`),
-
-  // Persona variants (A/B testing)
-  variantsList: (avatarId) => api.get(`/avatars/${avatarId}/variants`),
-  variantCreate: (avatarId, data) => api.post(`/avatars/${avatarId}/variants`, data),
-  variantPromote: (avatarId, variantId) => api.post(`/avatars/${avatarId}/variants/${variantId}/promote`),
-  variantDelete: (avatarId, variantId) => api.delete(`/avatars/${avatarId}/variants/${variantId}`),
-
-  // Cross-avatar idea share
-  ideaShareTo: (srcId, ideaId, dstId) => api.post(`/avatars/${srcId}/ideas/${ideaId}/share-to/${dstId}`),
+  // ===== Backward compat (no-op or stub) =====
+  health: async () => ({ status: 'ok' }),
+  colabHealth: async () => ({ status: 'not_applicable' }),
+  pauseAll: async () => ({ status: 'ok' }),
+  exportData: async () => new Blob(),
 }

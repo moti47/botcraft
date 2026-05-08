@@ -1,0 +1,15 @@
+# Don't deploy these to Vercel
+docker-compose.yml
+Dockerfile
+.env
+.env.local
+.env.*.local
+infra/
+n8n_workflows/
+app/
+services/
+core/
+tasks/
+tests/
+requirements.txt
+README.md

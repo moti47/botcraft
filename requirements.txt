@@ -26,3 +26,8 @@ boto3==1.35.79
 
 # Web Push (VAPID)
 pywebpush==2.0.0
+
+# Free-tier media providers (no Colab GPU needed)
+edge-tts>=6.1.0           # fallback TTS — completely free, no API key
+pandas>=2.0               # required by pytrends
+pytrends>=4.9.2           # Google Trends scraping for the trend engine

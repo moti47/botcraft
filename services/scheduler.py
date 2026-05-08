@@ -57,36 +57,69 @@ async def produce_video_for_avatar(avatar_id: str, video_type: str) -> None:
     """ה-callback שהמתזמן קורא לו ב-time-slot.
 
     video_type ∈ {"short", "long", "post"}:
-      • short / long → מפעילים את VideoOrchestrator עם נושא דיפולטי
-        (לקוח מ-trends אם יש; אחרת persona_dna.content_pillars[0]).
-      • post         → לוקחים את הסרטון האחרון שעוד לא פורסם
-        ומכניסים אותו ל-publisher.
+      • short / long → יצירה אוטומטית של סרטון חדש דרך הצינור (free-API):
+        - מחפשים trend signal טרי לאווטאר (אם אין — נופלים ל-content_pillars[0])
+        - יוצרים שורת videos
+        - run_pipeline מבצעת script→TTS→lipsync→music→assembly
+      • post → לוקחים את הסרטון האחרון שעוד לא פורסם ומכניסים ל-publisher.
     """
-    from core.supabase_client import get_row
-    from services.video_orchestrator import VideoOrchestrator
+    from datetime import datetime, timezone
 
-    logger.info(
-        "scheduler.fire", avatar_id=avatar_id, video_type=video_type,
-    )
+    from core.supabase_client import get_row, insert_row, select_rows
+    from services.video_pipeline import run_pipeline
+
+    logger.info("scheduler.fire", avatar_id=avatar_id, video_type=video_type)
 
     avatar = await get_row("avatars", avatar_id)
     if not avatar:
         logger.warning("scheduler.avatar_missing", avatar_id=avatar_id)
         return
 
-    # Vacation mode or manually paused — skip this fire
     if avatar.get("is_paused") or avatar.get("status") == "paused":
         logger.info("scheduler.skipped_paused", avatar_id=avatar_id, video_type=video_type)
         return
 
     if video_type in ("short", "long"):
-        # נושא ברירת מחדל: pillar הראשון של האווטאר
-        pillars = (avatar.get("persona_dna") or {}).get("content_pillars") or []
-        topic = pillars[0] if pillars else "today's trending topic"
+        # 1. בחר נושא — trend signal טרי או fallback ל-pillar
+        topic: str | None = None
         try:
-            orch = VideoOrchestrator()
-            await orch.produce(avatar_id, topic, voice="af_bella")
-        except Exception as exc:
+            signals = await select_rows(
+                "trend_signals",
+                filters={"niche": avatar.get("niche")},
+                order_by="score",
+                desc=True,
+                limit=1,
+            )
+            if signals:
+                topic = signals[0].get("topic")
+        except Exception:
+            pass
+        if not topic:
+            pillars = (avatar.get("persona_dna") or {}).get("content_pillars") or []
+            topic = pillars[0] if pillars else "today's trending topic"
+
+        # 2. צור שורת videos
+        try:
+            now_iso = datetime.now(timezone.utc).isoformat()
+            row = await insert_row(
+                "videos",
+                {
+                    "avatar_id": avatar_id,
+                    "topic": topic,
+                    "language": avatar.get("language") or "en",
+                    "status": "queued",
+                    "render_options": {"stages": {"queued": now_iso}, "video_type": video_type},
+                },
+            )
+            video_id = row.get("id")
+        except Exception:
+            logger.exception("scheduler.create_video_failed", avatar_id=avatar_id)
+            return
+
+        # 3. הרץ צינור (סינכרוני בתוך job-ה-cron — APScheduler runs it async)
+        try:
+            await run_pipeline(video_id)
+        except Exception:
             logger.exception(
                 "scheduler.produce_failed",
                 avatar_id=avatar_id, video_type=video_type,

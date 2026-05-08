@@ -20,19 +20,23 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(..., alias="GEMINI_API_KEY")
     cerebras_api_key: str = Field(..., alias="CEREBRAS_API_KEY")
 
-    # Media / assets
-    huggingface_api_key: str | None = Field(default=None, alias="HUGGINGFACE_API_KEY")
+    # Media APIs (free tier — no Colab)
+    elevenlabs_api_key: str | None = Field(default=None, alias="ELEVENLABS_API_KEY")
+    pollinations_token: str | None = Field(default=None, alias="POLLINATIONS_TOKEN")  # optional
+    did_api_key: str | None = Field(default=None, alias="DID_API_KEY")
+    fal_api_key: str | None = Field(default=None, alias="FAL_API_KEY")
+    creatomate_api_key: str | None = Field(default=None, alias="CREATOMATE_API_KEY")
     pexels_api_key: str | None = Field(default=None, alias="PEXELS_API_KEY")
+    pixabay_api_key: str | None = Field(default=None, alias="PIXABAY_API_KEY")
+    huggingface_api_key: str | None = Field(default=None, alias="HUGGINGFACE_API_KEY")
+
+    # Trend sources
+    youtube_api_key: str | None = Field(default=None, alias="YOUTUBE_API_KEY")  # for Data API v3 (key-only)
 
     # Infra
     redis_url: str = Field(default="redis://redis:6379", alias="REDIS_URL")
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     env: str = Field(default="local", alias="ENV")
-
-    # Colab service URLs (populated from *.trycloudflare.com URLs the notebooks print)
-    colab_tts_url: str | None = Field(default=None, alias="COLAB_TTS_URL")
-    colab_image_url: str | None = Field(default=None, alias="COLAB_IMAGE_URL")
-    colab_lipsync_url: str | None = Field(default=None, alias="COLAB_LIPSYNC_URL")
 
     # Worker
     video_worker_enabled: bool = Field(default=True, alias="VIDEO_WORKER_ENABLED")
@@ -45,7 +49,7 @@ class Settings(BaseSettings):
     r2_bucket: str = Field(default="viral-videos", alias="R2_BUCKET")
     r2_public_base_url: str | None = Field(default=None, alias="R2_PUBLIC_BASE_URL")
 
-    # YouTube Data API v3
+    # YouTube OAuth (for publishing — separate from Data API key above)
     youtube_client_id: str | None = Field(default=None, alias="YOUTUBE_CLIENT_ID")
     youtube_client_secret: str | None = Field(default=None, alias="YOUTUBE_CLIENT_SECRET")
     youtube_refresh_token: str | None = Field(default=None, alias="YOUTUBE_REFRESH_TOKEN")

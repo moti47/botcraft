@@ -1,0 +1,100 @@
+{
+  "name": "Trend Refresh (per-avatar, every 4h)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "hours", "hoursInterval": 4 }]
+        }
+      },
+      "id": "trendref-0001",
+      "name": "Every 4 hours",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [240, 320],
+      "notes": "טריגר כל 4 שעות. לכל avatar פעיל מריצים discover_for_avatar."
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "tableId": "avatars",
+        "returnAll": true,
+        "filterType": "manual",
+        "matchType": "allFilters",
+        "filters": {
+          "conditions": [
+            { "keyName": "is_active", "condition": "eq", "keyValue": "true" },
+            { "keyName": "is_paused", "condition": "eq", "keyValue": "false" }
+          ]
+        }
+      },
+      "id": "trendref-0002",
+      "name": "Supabase: active avatars",
+      "type": "n8n-nodes-base.supabase",
+      "typeVersion": 1,
+      "position": [480, 320],
+      "credentials": {
+        "supabaseApi": { "id": "supabase-main", "name": "Supabase main" }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "trendref-0003",
+      "name": "SplitInBatches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [720, 320]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://fastapi:8000/chat/tools/find_viral_topic",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"avatar_id\": \"{{ $json.id }}\",\n  \"top_n\": 5\n}",
+        "options": { "timeout": 90000 }
+      },
+      "id": "trendref-0004",
+      "name": "Discover trends for avatar",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [960, 320]
+    },
+    {
+      "parameters": {
+        "amount": 30
+      },
+      "id": "trendref-0005",
+      "name": "Wait 30s (politeness)",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1200, 320],
+      "notes": "מרווח בין avatars כדי לא להציף את Google Trends."
+    }
+  ],
+  "connections": {
+    "Every 4 hours": {
+      "main": [[{ "node": "Supabase: active avatars", "type": "main", "index": 0 }]]
+    },
+    "Supabase: active avatars": {
+      "main": [[{ "node": "SplitInBatches", "type": "main", "index": 0 }]]
+    },
+    "SplitInBatches": {
+      "main": [[{ "node": "Discover trends for avatar", "type": "main", "index": 0 }]]
+    },
+    "Discover trends for avatar": {
+      "main": [[{ "node": "Wait 30s (politeness)", "type": "main", "index": 0 }]]
+    },
+    "Wait 30s (politeness)": {
+      "main": [[{ "node": "SplitInBatches", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "Asia/Jerusalem"
+  },
+  "tags": [{ "name": "trends" }]
+}
