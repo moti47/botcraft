@@ -3,16 +3,11 @@
   "version": 2,
   "buildCommand": "cd dashboard && npm run build",
   "outputDirectory": "dashboard/dist",
-  "env": {
-    "VITE_API_URL": "@api_url",
-    "VITE_SUPABASE_URL": "@supabase_url",
-    "VITE_SUPABASE_ANON_KEY": "@supabase_anon_key",
-    "VITE_VAPID_PUBLIC_KEY": "@vapid_public_key"
-  },
+  "framework": null,
   "redirects": [
     {
       "source": "/api/:path*",
-      "destination": "https://your-supabase-project.supabase.co/functions/v1/:path*"
+      "destination": "https://unhorjseqvqmeoaqajnc.supabase.co/functions/v1/:path*"
     }
   ]
 }
