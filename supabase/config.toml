@@ -7,7 +7,6 @@ schemas = ["public", "graphql_public"]
 
 [auth]
 enable_signup = true
-enable_anonymous_signups = false
 jwt_expiry = 3600
 
 [studio]
