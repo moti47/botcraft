@@ -373,10 +373,13 @@ class VideoOrchestrator:
         raise TimeoutError(f"job {job_id} timed out after {timeout_sec}s on {base}")
 
     async def _call_tts(self, job_id: str, text: str, voice: str) -> str:
-        """POST to ``COLAB_TTS_URL/tts``, return audio download URL."""
+        """POST to ``COLAB_TTS_URL/tts``, return audio download URL.
+
+        Retries once on 5xx / transport errors (edge-tts can occasionally spike).
+        """
         if not self._tts_url:
             raise ColabUnavailable("COLAB_TTS_URL is not set")
-        # מעבירים גם voice (שם פריסט כמו af_bella) וגם speaker_wav_filename לצורך תאימות
+        # מעבירים גם voice וגם speaker_wav_filename לצורך תאימות עם שרתי Colab ישנים
         payload = {
             "job_id": job_id,
             "text": text,
@@ -384,16 +387,49 @@ class VideoOrchestrator:
             "speaker_wav_filename": voice if voice.endswith(".wav") else f"{voice}.wav",
             "language": "en",
         }
-        logger.info("orchestrator.tts.request", job_id=job_id, voice=voice)
-        try:
-            async with httpx.AsyncClient(timeout=600, follow_redirects=True) as http:
-                resp = await http.post(f"{self._tts_url}/tts", json=payload)
-        except httpx.HTTPError as exc:
-            raise ColabError(f"TTS transport error: {exc}") from exc
-        if resp.status_code >= 400:
-            raise ColabError(f"TTS {self._tts_url}/tts → {resp.status_code}: {resp.text[:200]}")
-        data = resp.json()
-        return data.get("url") or f"{self._tts_url}/jobs/{job_id}/download"
+        logger.info("orchestrator.tts.request", job_id=job_id, voice=voice,
+                    text_chars=len(text))
+
+        last_exc: Exception | None = None
+        for attempt in range(2):                          # attempt 0 → retry on failure
+            try:
+                async with httpx.AsyncClient(timeout=600, follow_redirects=True) as http:
+                    resp = await http.post(f"{self._tts_url}/tts", json=payload)
+            except httpx.HTTPError as exc:
+                last_exc = exc
+                if attempt == 0:
+                    logger.warning("orchestrator.tts.transport_error_retry",
+                                   job_id=job_id, error=str(exc))
+                    await asyncio.sleep(3)
+                    continue
+                raise ColabError(f"TTS transport error after retry: {exc}") from exc
+
+            if resp.status_code >= 500 and attempt == 0:
+                # 5xx from the TTS server — retry once
+                logger.warning("orchestrator.tts.5xx_retry",
+                               job_id=job_id, status=resp.status_code,
+                               body=resp.text[:200])
+                await asyncio.sleep(3)
+                continue
+
+            if resp.status_code >= 400:
+                # Extract a useful error detail from the JSON body if present
+                try:
+                    err_detail = resp.json().get("detail") or resp.text[:300]
+                except Exception:
+                    err_detail = resp.text[:300]
+                raise ColabError(
+                    f"TTS server returned {resp.status_code}: {err_detail}\n"
+                    f"URL: {self._tts_url}/tts"
+                )
+
+            data = resp.json()
+            return data.get("url") or f"{self._tts_url}/jobs/{job_id}/download"
+
+        # Both attempts exhausted
+        if last_exc:
+            raise ColabError(f"TTS failed after 2 attempts: {last_exc}")
+        raise ColabError("TTS failed after 2 attempts (unknown reason)")
 
     async def _call_image(self, job_id: str, prompt: str) -> str:
         """POST to ``COLAB_IMAGE_URL/generate-avatar``, return image download URL."""
@@ -483,6 +519,23 @@ class VideoOrchestrator:
             video_db_id = saved["id"]
 
         try:
+            # ---- שלב 0.5: וידוא מראש שכל ה-URLs מוגדרים לפני שמתחילים ----
+            # נכשל מהר (fail-fast) לפני שמבזבזים זמן על LLM / TTS / image
+            missing_urls: list[str] = []
+            if not self._tts_url:
+                missing_urls.append("COLAB_TTS_URL")
+            if not self._image_url:
+                missing_urls.append("COLAB_IMAGE_URL")
+            if not self._lipsync_url:
+                missing_urls.append("COLAB_LIPSYNC_URL")
+            if missing_urls:
+                msg = (
+                    f"pipeline misconfigured — missing server URLs: {', '.join(missing_urls)}. "
+                    "Set them via POST /admin/colab-urls or in .env and restart."
+                )
+                logger.error("orchestrator.missing_urls", missing=missing_urls, video_id=video_db_id)
+                raise OrchestratorError(msg)
+
             # ---- שלב 1: שליפת ה-persona_dna של האווטאר מסופבייס ----
             avatar_row = await get_row("avatars", avatar_id)
             if not avatar_row:

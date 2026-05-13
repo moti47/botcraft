@@ -171,11 +171,11 @@ def test_ideas_crud(httpx_client):
         # Create
         r = httpx_client.post(
             f"/avatars/{avatar['id']}/ideas",
-            json={"topic": "smoke test idea", "notes": "just a smoke test"},
+            json={"idea_text": "smoke test idea", "source": "manual"},
         )
         assert r.status_code in (200, 201), r.text
         idea = r.json()
-        assert idea.get("topic") == "smoke test idea"
+        assert idea.get("idea_text") == "smoke test idea"
         idea_id = idea["id"]
 
         # List

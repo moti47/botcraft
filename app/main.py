@@ -97,7 +97,10 @@ app.add_middleware(
     allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
-    allow_headers=["*"],
+    # Explicitly list Authorization so the preflight response always includes it.
+    # Some browsers do not honour the "*" wildcard for Authorization unless it
+    # appears explicitly in Access-Control-Allow-Headers.
+    allow_headers=["*", "Authorization", "Content-Type", "X-Requested-With"],
 )
 
 app.include_router(videos_router.router)

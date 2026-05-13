@@ -9,7 +9,7 @@ import asyncio
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import Response
 
 from app.schemas.models import (
@@ -31,7 +31,9 @@ from core.supabase_client import get_row, get_supabase, insert_row, select_rows,
 
 logger = get_logger(__name__)
 
-router = APIRouter(prefix="/avatars", tags=["avatars"])
+from app.dependencies.auth import get_current_user
+
+router = APIRouter(prefix="/avatars", tags=["avatars"], dependencies=[Depends(get_current_user)])
 
 
 # =====================================================================
@@ -118,13 +120,40 @@ async def delete_avatar(avatar_id: str) -> Response:
     await _get_avatar_or_404(avatar_id)
 
     def _do() -> None:
-        get_supabase().table("avatars").delete().eq("id", avatar_id).execute()
+        sb = get_supabase()
+        # Pre-clean child tables that may not cascade in all Supabase environments.
+        # (All have ON DELETE CASCADE in migrations 004–007, but an explicit
+        # pre-delete is a safety net for older/managed Supabase projects.)
+        for tbl, col in [
+            ("platform_tokens", "avatar_id"),
+            ("avatar_files",    "avatar_id"),
+            ("avatar_commands", "avatar_id"),
+            ("avatar_ideas",    "avatar_id"),
+            ("persona_variants","avatar_id"),
+            ("avatar_insights", "avatar_id"),
+            ("notifications",   "avatar_id"),
+        ]:
+            try:
+                sb.table(tbl).delete().eq(col, avatar_id).execute()
+            except Exception as pre_exc:
+                logger.warning("avatars.delete_pre_clean_skipped",
+                               table=tbl, error=str(pre_exc))
+
+        # Delete the avatar itself
+        resp = sb.table("avatars").delete().eq("id", avatar_id).execute()
+
+        # supabase-py v2 stores errors in resp.error rather than raising
+        if hasattr(resp, "error") and resp.error:
+            raise Exception(f"Supabase rejected deletion: {resp.error}")
 
     try:
         await asyncio.to_thread(_do)
     except Exception as exc:
         logger.exception("avatars.delete_failed", avatar_id=avatar_id)
-        raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, str(exc)) from exc
+        raise HTTPException(
+            status.HTTP_500_INTERNAL_SERVER_ERROR,
+            f"Failed to delete avatar: {exc}",
+        ) from exc
 
     logger.info("avatars.deleted", avatar_id=avatar_id)
     return Response(status_code=204)
