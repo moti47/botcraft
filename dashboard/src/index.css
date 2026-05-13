@@ -13,8 +13,8 @@
     -webkit-font-smoothing: antialiased;
   }
   body {
-    background: #0a0a0a;
-    color: #fafafa;
+    background: var(--bg, #F9FAFB);
+    color: var(--text, #1F2937);
   }
   ::-webkit-scrollbar {
     width: 8px;

@@ -90,21 +90,6 @@ class TrendOut(BaseModel):
 
 # ---------- Videos ----------
 
-class VideoQueueRequest(BaseModel):
-    script_id: str = Field(..., description="UUID of the script to render into video")
-    voice_ref_filename: str = Field(..., description="Voice reference filename on the TTS server.")
-    avatar_id: str | None = None
-    priority: int = Field(default=5, ge=1, le=10)
-    render_options: dict[str, Any] = Field(default_factory=dict)
-
-
-class VideoQueueResponse(BaseModel):
-    job_id: str
-    queue: str
-    position: int
-    status: str = "queued"
-
-
 class VideoProduceRequest(BaseModel):
     avatar_id: str = Field(..., description="UUID of the avatar to animate")
     topic: str = Field(..., min_length=3, max_length=240)
@@ -153,12 +138,6 @@ class VideoOut(BaseModel):
     error_message: str | None = None
     render_options: dict[str, Any] | None = None
     created_at: str | None = None
-
-
-class ColabHealthResponse(BaseModel):
-    tts: dict[str, Any] | str
-    image: dict[str, Any] | str
-    lipsync: dict[str, Any] | str
 
 
 # ---------- Posts / Publishing ----------

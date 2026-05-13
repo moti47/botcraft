@@ -60,36 +60,6 @@ async def get_counter(key: str) -> int:
     return int(val) if val else 0
 
 
-# =====================================================================
-# Runtime config — Colab URLs נשמרים ב-Redis ולא בקובץ .env
-# כך ש-/admin/colab-urls יכול לעדכן בלי restart לקונטיינרים.
-# =====================================================================
-
-CONFIG_COLAB_URLS_KEY = "config:colab_urls"
-
-
-async def get_colab_urls() -> dict[str, str]:
-    """מחזיר dict של {tts, image, lipsync} → URL. ערכים חסרים = string ריק."""
-    r = await get_redis()
-    raw = await r.get(CONFIG_COLAB_URLS_KEY)
-    if not raw:
-        return {"tts": "", "image": "", "lipsync": ""}
-    try:
-        return json.loads(raw)
-    except json.JSONDecodeError:
-        return {"tts": "", "image": "", "lipsync": ""}
-
-
-async def set_colab_urls(urls: dict[str, str]) -> dict[str, str]:
-    """מעדכן את ה-URLs (merge עם הקיימים)."""
-    current = await get_colab_urls()
-    current.update({k: v for k, v in urls.items() if v is not None})
-    r = await get_redis()
-    await r.set(CONFIG_COLAB_URLS_KEY, json.dumps(current))
-    logger.info("redis.colab_urls_updated", keys=list(urls.keys()))
-    return current
-
-
 # ----- ניהול error log אחרון לתצוגה ב-/admin/diagnostics -----
 
 ERROR_LOG_KEY = "admin:errors:recent"

@@ -1,0 +1,2 @@
+-- Seed data for local development (optional)
+-- Run via: supabase db push --seed-data

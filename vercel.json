@@ -1,0 +1,13 @@
+{
+  "name": "viral-empire-dashboard",
+  "version": 2,
+  "buildCommand": "cd dashboard && npm run build",
+  "outputDirectory": "dashboard/dist",
+  "framework": null,
+  "redirects": [
+    {
+      "source": "/api/:path*",
+      "destination": "https://unhorjseqvqmeoaqajnc.supabase.co/functions/v1/:path*"
+    }
+  ]
+}

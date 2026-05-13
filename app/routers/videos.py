@@ -1,14 +1,14 @@
-"""Videos router — full-pipeline endpoints.
+"""Videos router — drives the new no-Colab pipeline.
 
-``POST /videos/produce`` starts the pipeline in a FastAPI BackgroundTask and
-returns immediately. Progress is tracked on the ``videos`` row and readable
-via ``GET /videos/{video_id}/status``.
+``POST /videos/produce`` creates the video row in ``status='queued'`` and
+runs ``services.video_pipeline.run_pipeline`` in a FastAPI BackgroundTask
+(or enqueues a Redis job for the worker if you prefer durability).
 
-Other /videos/* endpoints (/queue, /{job_id}) stay in ``app/main.py`` for
-backwards compatibility with the legacy script_id flow.
+Other endpoints expose status/list/retry for the dashboard.
 """
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, status
@@ -22,54 +22,33 @@ from app.schemas.models import (
 )
 from core.config import get_settings
 from core.logging import get_logger
+from core.notify import notify_video_failure
 from core.redis_client import enqueue_job
 from core.supabase_client import get_row, insert_row, select_rows, update_row
-from services.colab_client import ColabUnavailable
-from services.notifications import notify_discord_failure
-from services.video_orchestrator import (
-    STATUS_FAILED,
-    STATUS_QUEUED,
-    OrchestratorError,
-    VideoOrchestrator,
-)
+from services.video_pipeline import run_pipeline
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/videos", tags=["videos"])
 
+STATUS_QUEUED = "queued"
+STATUS_FAILED = "failed"
 
-async def _run_pipeline_background(
-    video_db_id: str,
-    avatar_id: str,
-    topic: str,
-    voice: str,
-    auto_post: bool,
-) -> None:
-    """BackgroundTasks entry — kick off orchestrator, swallow terminal errors.
 
-    The orchestrator already stamps the videos row as failed and fires a
-    Discord alert on error, so here we only need to log and avoid crashing
-    the background task runner.
+async def _run_pipeline_background(video_id: str, avatar_id: str | None) -> None:
+    """BackgroundTasks entry — kick off pipeline, swallow terminal errors.
+
+    The pipeline already stamps the videos row as failed and fires a
+    notification on error; here we only need to log.
     """
-    orchestrator = VideoOrchestrator()
     try:
-        await orchestrator.produce(
-            avatar_id=avatar_id,
-            topic=topic,
-            voice=voice,
-            auto_post=auto_post,
-            existing_video_id=video_db_id,
-        )
-    except OrchestratorError as exc:
-        logger.error(
-            "videos.produce.pipeline_failed",
-            video_id=video_db_id, error=str(exc),
-        )
+        await run_pipeline(video_id)
     except Exception as exc:
-        logger.exception("videos.produce.background_crashed", video_id=video_db_id)
+        logger.exception("videos.produce.background_crashed", video_id=video_id)
         try:
-            await notify_discord_failure(
-                video_id=video_db_id, stage="background_task", reason=str(exc),
+            await notify_video_failure(
+                video_id=video_id, stage="background_task", reason=str(exc),
+                avatar_id=avatar_id,
             )
         except Exception:
             pass
@@ -85,20 +64,19 @@ async def produce(
     background_tasks: BackgroundTasks,
 ) -> VideoProduceResponse:
     """Start the full pipeline; returns immediately with the new video_id."""
-    # ---- שלב א: אימות שהאווטאר אכן קיים לפני שאנחנו יוצרים שורה ----
     avatar = await get_row("avatars", req.avatar_id)
     if not avatar:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"avatar {req.avatar_id} not found")
 
-    # ---- שלב ב: יצירת שורת videos במצב queued כדי שללקוח יהיה id לעקוב אחריו ----
     import uuid as _uuid
     job_id = str(_uuid.uuid4())
-    from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
 
     row = {
         "job_id": job_id,
         "avatar_id": req.avatar_id,
+        "topic": req.topic,
+        "language": getattr(req, "language", None) or avatar.get("language") or "en",
         "priority": 5,
         "render_options": {
             "topic": req.topic,
@@ -118,15 +96,7 @@ async def produce(
     if not video_db_id:
         raise HTTPException(status.HTTP_500_INTERNAL_SERVER_ERROR, "insert returned no id")
 
-    # ---- שלב ג: הרצת כל הצינור ברקע; הלקוח חוזר מייד עם video_id ----
-    background_tasks.add_task(
-        _run_pipeline_background,
-        video_db_id,
-        req.avatar_id,
-        req.topic,
-        req.voice,
-        req.auto_post,
-    )
+    background_tasks.add_task(_run_pipeline_background, video_db_id, req.avatar_id)
 
     logger.info(
         "videos.produce.queued",
@@ -194,13 +164,6 @@ async def get_video(video_id: str) -> VideoOut:
     return VideoOut(**row)
 
 
-# =====================================================================
-# Bug-fix #5 — POST /videos/{id}/retry
-#
-# מאפס סטטוס ל-queued ושולח את המשימה לעבודה מחדש.
-# שימושי כשהמשתמש רואה כשל בדשבורד ורוצה לנסות שוב בלחיצה אחת.
-# =====================================================================
-
 @router.post("/{video_id}/retry")
 async def retry_video(
     video_id: str, background_tasks: BackgroundTasks,
@@ -214,12 +177,6 @@ async def retry_video(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "video has no avatar_id")
 
     render_options = row.get("render_options") or {}
-    topic = render_options.get("topic") or "retry"
-    voice = render_options.get("voice") or "af_bella"
-    auto_post = bool(render_options.get("auto_post", False))
-
-    # ---- איפוס סטטוס ושמירת stage חדש ----
-    from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     new_options = {
         **render_options,
@@ -232,19 +189,15 @@ async def retry_video(
         "render_options": new_options,
     })
 
-    # ---- enqueue ל-Redis ולהפעיל background task ----
     try:
         await enqueue_job(
             get_settings().video_queue_name,
-            {"video_id": video_id, "avatar_id": avatar_id, "topic": topic, "voice": voice},
+            {"video_id": video_id, "avatar_id": avatar_id},
         )
     except Exception:
-        # נכשלה הכניסה לתור — נמשיך ב-BackgroundTasks
         logger.warning("videos.retry.enqueue_failed", video_id=video_id)
 
-    background_tasks.add_task(
-        _run_pipeline_background, video_id, avatar_id, topic, voice, auto_post,
-    )
+    background_tasks.add_task(_run_pipeline_background, video_id, avatar_id)
 
     logger.info("videos.retried", video_id=video_id)
     return VideoProduceResponse(

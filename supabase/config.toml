@@ -1,0 +1,26 @@
+# Supabase local dev config
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "graphql_public"]
+
+[auth]
+enable_signup = true
+jwt_expiry = 3600
+
+[studio]
+enabled = true
+port = 54323
+
+[functions.produce-video]
+verify_jwt = false
+
+[functions.find-viral-topic]
+verify_jwt = false
+
+[functions.learn-all]
+verify_jwt = false
+
+[functions.process-video-queue]
+verify_jwt = false

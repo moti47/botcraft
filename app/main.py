@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, status
@@ -19,7 +18,6 @@ from app.routers import videos as videos_router
 from app.schemas.models import (
     AvatarCreateRequest,
     AvatarOut,
-    ColabHealthResponse,
     HealthResponse,
     LLMUsageResponse,
     PlatformConnectRequest,
@@ -29,13 +27,11 @@ from app.schemas.models import (
     ScriptOut,
     TrendOut,
     VideoOut,
-    VideoQueueRequest,
-    VideoQueueResponse,
 )
 from core.config import get_settings
 from core.llm_router import AllProvidersFailed, get_router
 from core.logging import configure_logging, get_logger
-from core.redis_client import close_redis, enqueue_job, get_redis
+from core.redis_client import close_redis, get_redis
 from core.supabase_client import (
     get_row,
     get_supabase,
@@ -43,7 +39,6 @@ from core.supabase_client import (
     select_rows,
     update_row,
 )
-from services.colab_client import ColabError, ColabUnavailable, ImageClient, LipsyncClient, TTSClient
 from services.persona_generator import generate_persona
 from services.script_generator import generate_script
 from services.video_worker import run_worker
@@ -323,25 +318,7 @@ async def trends_top(limit: int = 5) -> list[TrendOut]:
     return [TrendOut(**r) for r in rows]
 
 
-# ---------- Colab & legacy video ----------
-
-@app.get("/colab/health", response_model=ColabHealthResponse, tags=["system"])
-async def colab_health() -> ColabHealthResponse:
-    async def _probe(client) -> dict | str:
-        try:
-            return await client.health()
-        except ColabUnavailable as exc:
-            return f"unavailable: {exc}"
-        except ColabError as exc:
-            return f"error: {exc}"
-
-    tts, image, lipsync = await asyncio.gather(
-        _probe(TTSClient()),
-        _probe(ImageClient()),
-        _probe(LipsyncClient()),
-    )
-    return ColabHealthResponse(tts=tts, image=image, lipsync=lipsync)
-
+# ---------- Video lookup by job_id (kept for backward compatibility) ----------
 
 @app.get("/videos/{job_id}", response_model=VideoOut, tags=["videos"])
 async def videos_get(job_id: str) -> VideoOut:
@@ -349,23 +326,3 @@ async def videos_get(job_id: str) -> VideoOut:
     if not rows:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"video {job_id} not found")
     return VideoOut(**rows[0])
-
-
-@app.post("/videos/queue", response_model=VideoQueueResponse, tags=["videos"])
-async def videos_queue(req: VideoQueueRequest) -> VideoQueueResponse:
-    job_id = str(uuid.uuid4())
-    queue_name = get_settings().video_queue_name
-    merged_options = {**req.render_options, "voice_ref_filename": req.voice_ref_filename}
-    payload = {"job_id": job_id, "script_id": req.script_id, "avatar_id": req.avatar_id, "priority": req.priority, "render_options": merged_options}
-
-    try:
-        await insert_row("videos", {**payload, "status": "queued"})
-    except Exception as exc:
-        logger.warning("videos.queue_db_insert_failed", error=str(exc))
-
-    try:
-        position = await enqueue_job(queue_name, payload)
-    except Exception as exc:
-        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
-
-    return VideoQueueResponse(job_id=job_id, queue=queue_name, position=position, status="queued")

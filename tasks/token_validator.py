@@ -1,7 +1,7 @@
 """משימת רקע — בדיקת תוקף של platform_tokens כל 6 שעות.
 
 לכל token פעיל אנו עושים test API call לפלטפורמה המתאימה. אם מקבלים
-401/403 — נסמן is_active=false ונשלח התראה ל-Discord.
+401/403 — נסמן is_active=false ונשלח התראה ב-app (SSE + push).
 
 ה-task מותקן ב-FastAPI lifespan ורץ ברקע.
 """
@@ -13,8 +13,8 @@ from typing import Any
 import httpx
 
 from core.logging import get_logger
+from core.notify import notify  # in-app notify (SSE + push)
 from core.supabase_client import get_supabase, select_rows, update_row
-from services.notifications import notify_discord_failure
 
 logger = get_logger(__name__)
 
@@ -110,10 +110,10 @@ async def validate_all_tokens() -> dict[str, int]:
             except Exception:
                 logger.exception("token_validator.update_failed", token_id=row.get("id"))
             try:
-                await notify_discord_failure(
-                    video_id=row.get("avatar_id") or "",
-                    stage="token_invalid",
-                    reason=f"{platform} token expired/invalid for token id {row['id']}",
+                await notify(
+                    title=f"{platform} token expired",
+                    message=f"Token {row['id']} on avatar {row.get('avatar_id') or '?'} is invalid; please reconnect.",
+                    level="error",
                 )
             except Exception:
                 pass
