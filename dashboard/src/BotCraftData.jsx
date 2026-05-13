@@ -12,6 +12,33 @@ import { supabase } from './lib/api'
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:54321/functions/v1'
 
 /**
+ * Wrap an external image URL through our proxy if it's a known
+ * CORS-blocked host (Pollinations, Pexels, etc).
+ * Use this whenever displaying an image in <img> tags.
+ */
+export const proxyImage = (url) => {
+  if (!url) return url
+  if (url.startsWith('data:') || url.startsWith('blob:')) return url
+  try {
+    const host = new URL(url).hostname
+    const proxiedHosts = [
+      'image.pollinations.ai',
+      'pollinations.ai',
+      'images.unsplash.com',
+      'images.pexels.com',
+      'pixabay.com',
+      'cdn.pixabay.com',
+    ]
+    if (proxiedHosts.includes(host)) {
+      return `${API_URL}/proxy-image?url=${encodeURIComponent(url)}`
+    }
+  } catch {
+    // not a valid URL - return as is
+  }
+  return url
+}
+
+/**
  * Hook: Use avatars (real data)
  */
 export const useAvatars = () => {
@@ -25,14 +52,19 @@ export const useAvatars = () => {
 
       if (error) throw error
 
-      // Transform to BotCraft format
+      // Transform to BotCraft format (passes through all raw fields too)
       return (data || []).map(a => ({
+        ...a,                                          // raw row first — brand_identity, tone, etc.
         id: a.id,
         name: a.name || 'Unnamed',
         niche: a.niche || 'general',
         lang: a.language || 'EN',
+        language: a.language || 'EN',
         initial: (a.name || '?')[0].toUpperCase(),
         grad: `linear-gradient(135deg, #7C3AED, #06B6D4)`,
+        image_url: a.image_url || a.face_url || null,
+        bio: a.bio || null,
+        music_genre: a.music_genre || null,
         videos: 0, // will be filled by videos query
         views: '0',
         growth: '+0%',
@@ -124,24 +156,176 @@ export const useInsights = () => {
 }
 
 /**
- * Hook: Create avatar
+ * Helper: get auth header with the current user's JWT
+ */
+async function getAuthHeaders() {
+  const { data: { session } } = await supabase.auth.getSession()
+  const token = session?.access_token
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }
+}
+
+/**
+ * Hook: Create avatar (with optional fields for AI auto-fill)
  */
 export const useCreateAvatar = () => {
   const queryClient = useQueryClient()
 
   return useMutation({
-    mutationFn: async ({ niche, language = 'EN', tone = 'engaging' }) => {
+    mutationFn: async (input) => {
       const res = await fetch(`${API_URL}/create-avatar`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ niche, language, tone, avatar_style: 'realistic' }),
+        headers: await getAuthHeaders(),
+        body: JSON.stringify(input),
       })
 
       if (!res.ok) {
-        const err = await res.json()
+        const err = await res.json().catch(() => ({}))
         throw new Error(err.error || 'Failed to create avatar')
       }
 
+      return res.json()
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['avatars'] })
+    },
+  })
+}
+
+/**
+ * Hook: Preview an avatar (no DB write — just LLM + image generation)
+ */
+export const useAvatarPreview = () => {
+  return useMutation({
+    mutationFn: async (input) => {
+      const res = await fetch(`${API_URL}/create-avatar`, {
+        method: 'POST',
+        headers: await getAuthHeaders(),
+        body: JSON.stringify({ ...input, preview_only: true }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Preview failed')
+      }
+      return res.json()
+    },
+  })
+}
+
+/**
+ * Hook: Match voices for an avatar (ElevenLabs)
+ */
+export const useMatchVoices = (avatarId, enabled = true) => {
+  return useQuery({
+    queryKey: ['voice-matches', avatarId],
+    queryFn: async () => {
+      const res = await fetch(`${API_URL}/match-voices`, {
+        method: 'POST',
+        headers: await getAuthHeaders(),
+        body: JSON.stringify({ avatar_id: avatarId }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Voice match failed')
+      }
+      return res.json()
+    },
+    enabled: !!avatarId && enabled,
+    staleTime: 5 * 60 * 1000,  // 5 min cache
+  })
+}
+
+/**
+ * Hook: Set the selected voice on an avatar
+ */
+export const useSetAvatarVoice = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ avatar_id, voice_id, voice_name }) => {
+      const { data, error } = await supabase
+        .from('avatars')
+        .update({ voice_id, voice_name })
+        .eq('id', avatar_id)
+        .select()
+        .single()
+      if (error) throw error
+      return data
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['avatars'] })
+    },
+  })
+}
+
+/**
+ * Hook: Publish a video (mark as posted on platforms)
+ */
+export const usePublishVideo = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ video_id, platforms = ['yt'] }) => {
+      const res = await fetch(`${API_URL}/publish-video`, {
+        method: 'POST',
+        headers: await getAuthHeaders(),
+        body: JSON.stringify({ video_id, platforms }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Publish failed')
+      }
+      return res.json()
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['videos'] })
+      queryClient.invalidateQueries({ queryKey: ['avatar-videos'] })
+    },
+  })
+}
+
+/**
+ * Hook: Discard a video (mark as discarded)
+ */
+export const useDiscardVideo = () => {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: async ({ video_id }) => {
+      const res = await fetch(`${API_URL}/discard-video`, {
+        method: 'POST',
+        headers: await getAuthHeaders(),
+        body: JSON.stringify({ video_id }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Discard failed')
+      }
+      return res.json()
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['videos'] })
+      queryClient.invalidateQueries({ queryKey: ['avatar-videos'] })
+    },
+  })
+}
+
+/**
+ * Hook: Send a natural-language command to an avatar
+ */
+export const useAvatarCommand = () => {
+  const queryClient = useQueryClient()
+
+  return useMutation({
+    mutationFn: async ({ avatar_id, command }) => {
+      const res = await fetch(`${API_URL}/avatar-command`, {
+        method: 'POST',
+        headers: await getAuthHeaders(),
+        body: JSON.stringify({ avatar_id, command }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Command failed')
+      }
       return res.json()
     },
     onSuccess: () => {
@@ -157,16 +341,17 @@ export const useProduceVideo = () => {
   const queryClient = useQueryClient()
 
   return useMutation({
-    mutationFn: async ({ avatar_id, topic, scheduled_for = null }) => {
+    mutationFn: async ({ avatar_id, topic, scheduled_for = null, user_command = null }) => {
       const res = await fetch(`${API_URL}/produce-video`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await getAuthHeaders(),
         body: JSON.stringify({
           avatar_id,
           topic: topic || null,
           voice: 'auto',
           auto_post: false,
-          scheduled_for,  // ISO 8601 string or null = produce now
+          scheduled_for,
+          user_command,
         }),
       })
 

@@ -75,6 +75,20 @@ export const useAuth = () => {
     return { data, error }
   }, [])
 
+  const signUpWithEmail = useCallback(async (email, password) => {
+    setLoading(true)
+    setError(null)
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+    })
+    if (error) {
+      setError(error)
+    }
+    setLoading(false)
+    return { data, error }
+  }, [])
+
   const signOut = useCallback(async () => {
     setLoading(true)
     const { error } = await supabase.auth.signOut()
@@ -92,6 +106,7 @@ export const useAuth = () => {
     isAuthenticated: !!user,
     signInWithGoogle,
     signInWithEmail,
+    signUpWithEmail,
     signOut,
   }
 }

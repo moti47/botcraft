@@ -12,10 +12,15 @@ import {
   useMockData,
   useCreateAvatar,
   useProduceVideo,
+  proxyImage,
   STRINGS,
 } from './BotCraftData'
 import { useAuth } from './hooks/useAuth'
 import { useAllRealtime } from './hooks/useRealtime'
+import { NewAvatarModal } from './components/NewAvatarModal'
+import { AvatarCommandInput } from './components/AvatarCommandInput'
+import { AvatarDetailModal } from './components/AvatarDetailModal'
+import { LanguagePicker } from './components/LanguagePicker'
 
 const BotCraftPage = () => {
   const [lang, setLang] = useState(() => localStorage.getItem('botcraft-lang') || 'EN')
@@ -25,12 +30,46 @@ const BotCraftPage = () => {
   const [newAvatarNiche, setNewAvatarNiche] = useState('')
   const [videoTopic, setVideoTopic] = useState('')
   const [videoScheduledFor, setVideoScheduledFor] = useState('')  // empty = produce now
+  const [showNewAvatarModal, setShowNewAvatarModal] = useState(false)
+  const [selectedAvatarId, setSelectedAvatarId] = useState(null)
 
   const strings = STRINGS[lang]
   const queryClient = useQueryClient()
 
   // === Auth (persistent session) ===
-  const { user, loading: authLoading, signInWithGoogle, signOut } = useAuth()
+  const {
+    user, loading: authLoading, error: authError,
+    signInWithGoogle, signInWithEmail, signUpWithEmail, signOut,
+  } = useAuth()
+
+  // === Login form state ===
+  const [authMode, setAuthMode] = useState('signin')  // 'signin' | 'signup'
+  const [authEmail, setAuthEmail] = useState('')
+  const [authPassword, setAuthPassword] = useState('')
+  const [authMessage, setAuthMessage] = useState(null)
+
+  const handleEmailAuth = async (e) => {
+    e.preventDefault()
+    setAuthMessage(null)
+    if (!authEmail || !authPassword) {
+      setAuthMessage({ type: 'error', text: 'Enter both email and password' })
+      return
+    }
+    if (authPassword.length < 6) {
+      setAuthMessage({ type: 'error', text: 'Password must be 6+ characters' })
+      return
+    }
+    const fn = authMode === 'signup' ? signUpWithEmail : signInWithEmail
+    const { error } = await fn(authEmail, authPassword)
+    if (error) {
+      setAuthMessage({ type: 'error', text: error.message })
+    } else if (authMode === 'signup') {
+      setAuthMessage({
+        type: 'success',
+        text: 'Account created! Check your email to confirm (or sign in if confirmation is off).',
+      })
+    }
+  }
 
   // === Realtime (live data updates via WebSocket) ===
   useAllRealtime(user?.id)
@@ -48,22 +87,17 @@ const BotCraftPage = () => {
   const produceVideoMutation = useProduceVideo()
 
   // === Handlers ===
-  const handleCreateAvatar = async (e) => {
-    e.preventDefault()
-    if (!newAvatarNiche.trim()) return
+  // Opens the rich modal (replaces the old inline form)
+  const handleCreateAvatar = () => {
+    setShowNewAvatarModal(true)
+  }
 
-    try {
-      await createAvatarMutation.mutateAsync({
-        niche: newAvatarNiche,
-        language: lang,
-        tone: 'engaging',
-      })
-      setNewAvatarNiche('')
-      setShowNotification({ type: 'success', msg: 'Avatar created! 🎭' })
-      queryClient.invalidateQueries({ queryKey: ['avatars'] })
-    } catch (err) {
-      setShowNotification({ type: 'error', msg: 'Failed to create avatar' })
-    }
+  const onAvatarCreated = (avatar) => {
+    setShowNotification({
+      type: 'success',
+      msg: `Avatar "${avatar.name}" created! 🎭`,
+    })
+    queryClient.invalidateQueries({ queryKey: ['avatars'] })
   }
 
   const handleProduceVideo = async (avatarId) => {
@@ -118,33 +152,145 @@ const BotCraftPage = () => {
         minHeight: '100vh',
         background: 'var(--brand-gradient)',
         fontFamily: 'var(--font-body)',
+        padding: '20px',
       }}>
         <div style={{
           background: 'var(--surface)',
           borderRadius: 'var(--radius-lg)',
           padding: '40px',
-          textAlign: 'center',
           boxShadow: 'var(--shadow-xl)',
+          width: '100%',
           maxWidth: '400px',
         }}>
-          <h1 style={{ color: 'var(--text)', marginBottom: '16px' }}>
+          <h1 style={{ color: 'var(--text)', marginBottom: '8px', textAlign: 'center' }}>
             🎭 BotCraft
           </h1>
-          <p style={{ color: 'var(--text-muted)', marginBottom: '24px' }}>
-            Create AI avatars that generate, post, and grow on autopilot
+          <p style={{ color: 'var(--text-muted)', marginBottom: '24px', textAlign: 'center', fontSize: '13px' }}>
+            {authMode === 'signup'
+              ? 'Create an account to start crafting AI personas'
+              : 'Welcome back — sign in to continue'}
           </p>
+
+          {/* Email / Password form */}
+          <form onSubmit={handleEmailAuth} style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+            <input
+              type="email"
+              placeholder="you@example.com"
+              value={authEmail}
+              onChange={(e) => setAuthEmail(e.target.value)}
+              autoComplete="email"
+              required
+              style={{
+                padding: '10px 14px',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)',
+                fontSize: '13px',
+                background: 'var(--surface-2)',
+                color: 'var(--text)',
+              }}
+            />
+            <input
+              type="password"
+              placeholder="••••••• (6+ chars)"
+              value={authPassword}
+              onChange={(e) => setAuthPassword(e.target.value)}
+              autoComplete={authMode === 'signup' ? 'new-password' : 'current-password'}
+              required
+              minLength={6}
+              style={{
+                padding: '10px 14px',
+                border: '1px solid var(--border)',
+                borderRadius: 'var(--radius-md)',
+                fontSize: '13px',
+                background: 'var(--surface-2)',
+                color: 'var(--text)',
+              }}
+            />
+            <button
+              type="submit"
+              disabled={authLoading}
+              style={{
+                background: 'var(--brand-gradient)',
+                color: '#fff',
+                padding: '12px 24px',
+                border: 'none',
+                borderRadius: 'var(--radius-md)',
+                fontWeight: 'bold',
+                cursor: authLoading ? 'wait' : 'pointer',
+                fontSize: '14px',
+                boxShadow: 'var(--shadow-glow)',
+                opacity: authLoading ? 0.7 : 1,
+              }}
+            >
+              {authLoading ? '...' : authMode === 'signup' ? '🚀 Create account' : '🔑 Sign in'}
+            </button>
+          </form>
+
+          {/* Toggle signup/signin */}
+          <div style={{ marginTop: '16px', textAlign: 'center', fontSize: '12px', color: 'var(--text-muted)' }}>
+            {authMode === 'signup' ? 'Already have an account?' : "Don't have an account?"}{' '}
+            <button
+              type="button"
+              onClick={() => {
+                setAuthMode(authMode === 'signup' ? 'signin' : 'signup')
+                setAuthMessage(null)
+              }}
+              style={{
+                background: 'none',
+                border: 'none',
+                color: 'var(--primary)',
+                cursor: 'pointer',
+                fontWeight: '600',
+                padding: 0,
+              }}
+            >
+              {authMode === 'signup' ? 'Sign in' : 'Create one'}
+            </button>
+          </div>
+
+          {/* Status message */}
+          {authMessage && (
+            <div style={{
+              marginTop: '16px',
+              padding: '10px 12px',
+              borderRadius: 'var(--radius-md)',
+              fontSize: '12px',
+              background: authMessage.type === 'error' ? 'var(--danger-bg)' : 'var(--success-bg)',
+              color: authMessage.type === 'error' ? 'var(--danger)' : 'var(--success)',
+              border: `1px solid ${authMessage.type === 'error' ? 'rgba(239,68,68,0.3)' : 'rgba(16,185,129,0.3)'}`,
+            }}>
+              {authMessage.text}
+            </div>
+          )}
+
+          {/* Divider */}
+          <div style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '12px',
+            margin: '20px 0',
+            color: 'var(--text-dim)',
+            fontSize: '11px',
+          }}>
+            <div style={{ flex: 1, height: '1px', background: 'var(--border)' }} />
+            <span>OR</span>
+            <div style={{ flex: 1, height: '1px', background: 'var(--border)' }} />
+          </div>
+
+          {/* Google OAuth (optional, fails gracefully if not configured) */}
           <button
             onClick={signInWithGoogle}
+            disabled={authLoading}
             style={{
-              background: 'var(--brand-gradient)',
-              color: '#fff',
-              padding: '12px 24px',
-              border: 'none',
+              width: '100%',
+              background: 'var(--surface-2)',
+              color: 'var(--text)',
+              padding: '10px 24px',
+              border: '1px solid var(--border)',
               borderRadius: 'var(--radius-md)',
-              fontWeight: 'bold',
+              fontWeight: '600',
               cursor: 'pointer',
-              fontSize: '14px',
-              boxShadow: 'var(--shadow-glow)',
+              fontSize: '13px',
             }}
           >
             Continue with Google
@@ -228,24 +374,8 @@ const BotCraftPage = () => {
           padding: '12px 8px',
           borderTop: '1px solid var(--border)',
         }}>
-          <button
-            onClick={() => setLang(lang === 'EN' ? 'HE' : 'EN')}
-            style={{
-              width: '100%',
-              padding: '8px 12px',
-              background: 'var(--surface-2)',
-              color: 'var(--text)',
-              border: '1px solid var(--border)',
-              borderRadius: 'var(--radius-md)',
-              cursor: 'pointer',
-              fontSize: '11px',
-              fontWeight: '600',
-            }}
-          >
-            {lang === 'EN' ? 'עברית' : 'English'}
-          </button>
           <div style={{
-            marginTop: '12px',
+            marginTop: '0',
             padding: '8px',
             fontSize: '11px',
             color: 'var(--text-dim)',
@@ -368,8 +498,10 @@ const BotCraftPage = () => {
               {mockData?.notifications || 0} notifications
             </div>
 
+            <LanguagePicker value={lang} onChange={setLang} />
+
             <button
-              onClick={() => setCurrentPage('avatars')}
+              onClick={() => setShowNewAvatarModal(true)}
               style={{
                 padding: '8px 16px',
                 background: 'var(--brand-gradient)',
@@ -382,7 +514,7 @@ const BotCraftPage = () => {
                 boxShadow: 'var(--shadow-glow)',
               }}
             >
-              ➕ {strings?.quickCreate || 'Quick create'}
+              ➕ New avatar
             </button>
           </div>
         </header>
@@ -411,6 +543,7 @@ const BotCraftPage = () => {
               strings={strings}
               onCreateAvatar={handleCreateAvatar}
               onProduceVideo={handleProduceVideo}
+              onSelectAvatar={setSelectedAvatarId}
               newAvatarNiche={newAvatarNiche}
               setNewAvatarNiche={setNewAvatarNiche}
               videoTopic={videoTopic}
@@ -445,6 +578,21 @@ const BotCraftPage = () => {
           {showNotification.msg}
         </div>
       )}
+
+      {/* === NEW AVATAR MODAL === */}
+      <NewAvatarModal
+        isOpen={showNewAvatarModal}
+        onClose={() => setShowNewAvatarModal(false)}
+        onSuccess={onAvatarCreated}
+        uiLanguage={lang}
+      />
+
+      {/* === AVATAR DETAIL MODAL === */}
+      <AvatarDetailModal
+        avatar={avatars.find((a) => a.id === selectedAvatarId)}
+        isOpen={!!selectedAvatarId}
+        onClose={() => setSelectedAvatarId(null)}
+      />
     </div>
   )
 }
@@ -655,6 +803,7 @@ const AvatarsPage = ({
   strings,
   onCreateAvatar,
   onProduceVideo,
+  onSelectAvatar,
   newAvatarNiche,
   setNewAvatarNiche,
   videoTopic,
@@ -665,47 +814,42 @@ const AvatarsPage = ({
 }) => {
   return (
     <div>
-      {/* Create Form */}
-      <form onSubmit={onCreateAvatar} style={{
-        background: 'var(--surface)',
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-lg)',
-        padding: '20px',
-        marginBottom: '32px',
-        display: 'flex',
-        gap: '12px',
-      }}>
-        <input
-          type="text"
-          placeholder="Avatar niche (tech, fitness, comedy...)"
-          value={newAvatarNiche}
-          onChange={(e) => setNewAvatarNiche(e.target.value)}
-          style={{
-            flex: 1,
-            padding: '10px 14px',
-            border: '1px solid var(--border)',
-            borderRadius: 'var(--radius-md)',
-            fontSize: '13px',
-            color: 'var(--text)',
-            background: 'var(--surface-2)',
-          }}
-        />
-        <button
-          type="submit"
-          style={{
-            padding: '10px 20px',
-            background: 'var(--brand-gradient)',
-            color: '#fff',
-            border: 'none',
-            borderRadius: 'var(--radius-md)',
-            fontWeight: '600',
-            cursor: 'pointer',
-            boxShadow: 'var(--shadow-glow)',
-          }}
-        >
-          Create Avatar
-        </button>
-      </form>
+      {/* Big Create button */}
+      <button
+        type="button"
+        onClick={onCreateAvatar}
+        style={{
+          width: '100%',
+          padding: '24px',
+          background: 'var(--brand-gradient)',
+          color: '#fff',
+          border: 'none',
+          borderRadius: 'var(--radius-lg)',
+          marginBottom: '32px',
+          fontSize: '15px',
+          fontWeight: '700',
+          cursor: 'pointer',
+          boxShadow: 'var(--shadow-glow)',
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          gap: '10px',
+        }}
+      >
+        ✨ New avatar — AI fills in the rest
+      </button>
+
+      {avatars.length === 0 && (
+        <div style={{
+          textAlign: 'center',
+          padding: '40px 20px',
+          color: 'var(--text-muted)',
+          fontSize: '13px',
+        }}>
+          No avatars yet. Click the button above to create your first one! 🎭
+        </div>
+      )}
+
 
       {/* Avatars Grid */}
       <div style={{
@@ -736,27 +880,62 @@ const AvatarsPage = ({
               e.currentTarget.style.transform = 'none'
             }}
           >
-            <div style={{
-              width: '60px',
-              height: '60px',
-              borderRadius: '12px',
-              background: a.grad,
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              color: '#fff',
-              fontSize: '24px',
-              fontWeight: 'bold',
-              margin: '0 auto 12px',
-            }}>
-              {a.initial}
-            </div>
-            <h3 style={{
-              margin: '0 0 4px',
-              fontSize: '14px',
-              fontWeight: '600',
-              color: 'var(--text)',
-            }}>
+            <button
+              type="button"
+              onClick={() => onSelectAvatar?.(a.id)}
+              title="Click to view details"
+              style={{
+                width: '80px',
+                height: '80px',
+                borderRadius: '14px',
+                background: a.grad,
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                color: '#fff',
+                fontSize: '28px',
+                fontWeight: 'bold',
+                margin: '0 auto 12px',
+                overflow: 'hidden',
+                backgroundImage: a.image_url ? `url(${proxyImage(a.image_url)})` : a.grad,
+                backgroundSize: 'cover',
+                backgroundPosition: 'center',
+                border: 'none',
+                cursor: 'pointer',
+                padding: 0,
+                transition: 'transform var(--transition-base), box-shadow var(--transition-base)',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.transform = 'scale(1.05)'
+                e.currentTarget.style.boxShadow = 'var(--shadow-glow)'
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.transform = 'scale(1)'
+                e.currentTarget.style.boxShadow = 'none'
+              }}
+            >
+              {!a.image_url && a.initial}
+            </button>
+            {a.bio && (
+              <p style={{
+                margin: '0 0 8px',
+                fontSize: '11px',
+                color: 'var(--text-muted)',
+                lineHeight: 1.4,
+                minHeight: '32px',
+              }}>
+                {a.bio}
+              </p>
+            )}
+            <h3
+              onClick={() => onSelectAvatar?.(a.id)}
+              style={{
+                margin: '0 0 4px',
+                fontSize: '14px',
+                fontWeight: '600',
+                color: 'var(--text)',
+                cursor: 'pointer',
+              }}>
               {a.name}
             </h3>
             <p style={{
@@ -832,6 +1011,9 @@ const AvatarsPage = ({
                 {videoScheduledFor ? '⏰ Schedule' : '🎬 Produce now'}
               </button>
             </div>
+
+            {/* Natural-language command input — refine the avatar */}
+            <AvatarCommandInput avatarId={a.id} />
           </div>
         ))}
       </div>

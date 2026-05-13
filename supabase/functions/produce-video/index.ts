@@ -23,6 +23,7 @@ interface RequestBody {
   auto_post?: boolean;
   language?: string;
   scheduled_for?: string;  // ISO 8601; null = produce now
+  user_command?: string;   // optional: "make it funnier", "emphasize the surprise"
 
   // For cron-driven execution
   video_id?: string;
@@ -106,6 +107,18 @@ async function runPipeline(videoId: string) {
     scheduled_for: new Date().toISOString(),
   }]);
 
+  // Trigger generation immediately (don't wait — fire-and-forget so the
+  // user sees the response right away, then realtime updates flip the
+  // status to ready_for_review when generation finishes).
+  fetch(`${SUPABASE_URL}/functions/v1/process-video-queue`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Authorization": `Bearer ${SERVICE_KEY}`,
+    },
+    body: JSON.stringify({ video_id: videoId }),
+  }).catch((err) => console.error("[produce-video] generation trigger failed:", err));
+
   return { video_id: videoId, status: "processing", topic };
 }
 
@@ -135,7 +148,7 @@ serve(async (req: Request) => {
     // Path B: user-initiated
     const {
       avatar_id, topic, voice = "auto", auto_post = false,
-      language, scheduled_for = null,
+      language, scheduled_for = null, user_command = null,
     } = body;
 
     if (!avatar_id) {
@@ -165,6 +178,7 @@ serve(async (req: Request) => {
       topic: topic || null,
       status: "queued",
       scheduled_for,
+      user_command: user_command || null,
       render_options: { voice, auto_post, language: language || avatar.language || "en" },
       created_at: now,
     }]);
