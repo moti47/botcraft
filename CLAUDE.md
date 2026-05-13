@@ -1,80 +1,91 @@
-# Botcraft / Viral Empire — repo guide
+# BotCraft — repo guide
 
-Local-first AI-influencer stack: FastAPI backend, React dashboard, Redis-backed worker, n8n workflows, and **free-tier media APIs** (no Colab GPU servers anymore). The README has the full architecture; this file is the orientation map.
+Multi-user AI-influencer platform: each user creates AI personas that auto-produce viral short-form videos and publish to their own channels. **Fully serverless** — no FastAPI backend, no Docker, no Redis worker, no n8n. Just React + Supabase.
 
-## Sub-projects in this folder
+## Stack
 
-The user has been writing code across **several distinct sub-projects** in this directory. When a request comes in, pick the right one before diving in.
+- **Frontend:** React 18 + Vite + TanStack Query + Zustand + Tailwind + Radix UI. Deployed on Vercel.
+- **Backend:** Supabase Edge Functions (Deno/TypeScript). Postgres with RLS + Realtime + Storage + pg_cron + pgvector.
+- **AI providers (all free-tier):** Groq (llama-3.3-70b primary, llama-3.1-8b fallback), Gemini, HuggingFace inference (embeddings), Pollinations (image + audio), YouTube Data API (trends), Pexels/Pixabay/Unsplash (b-roll). ElevenLabs/D-ID are integrated but blocked on free tier — we fall back to browser SpeechSynthesis (voice_id prefixed `browser:`).
 
-### 1. FastAPI backend — `app/`, `core/`, `services/`, `tasks/`
-- Entry: `app/main.py` (uvicorn on `:8000`)
-- Routers (`app/routers/`): `avatars.py`, `videos.py`, `scheduler.py`, `posts.py`, `analytics.py`, `admin.py`, `chat.py`, `insights.py`, `notifications.py`
-- Core (`core/`): `config.py`, `llm_router.py` (Groq→Gemini→Cerebras fallthrough), `redis_client.py`, `supabase_client.py`, `logging.py`, `notify.py`
-- Services (`services/`):
-  - `persona_generator.py`, `avatar_image.py` (Pollinations)
-  - `script_generator.py` — LLM → script JSON
-  - `visual_director.py` — LLM → scene-by-scene render plan (zoom/clips/music volume/transitions)
-  - `trend_engine.py` — Google Trends + YouTube + LLM → ranked viral topics
-  - `music_selector.py` — picks royalty-free music from cache (Pixabay)
-  - `video_pipeline.py` — full no-Colab pipeline (script → TTS → lipsync → music → assembly)
-  - `learning_system.py` — extracts patterns from analytics → `learning_facts` table
-  - `scheduler.py` (APScheduler, Asia/Jerusalem)
-  - `r2_uploader.py`, `rate_limiter.py`, `publisher.py`
-  - `providers/` — free-API clients: `elevenlabs_tts`, `edge_tts` (fallback), `pollinations_image`, `did_lipsync`, `fal_lipsync` (fallback), `pexels_music` (B-roll), `pixabay_music`, `creatomate_assembly`, `google_trends`, `youtube_trends`
-- Tasks (`tasks/`): `video_worker.py` (Redis queue drainer running `services.video_pipeline.run_pipeline`), `token_validator.py` (6h token refresh)
+## Layout
 
-### 2. React dashboard — `dashboard/`
-- Vite + React 18, TanStack Query, Zustand, Radix UI, Tailwind, Axios, Recharts
-- Dev server on `:3000`. Source under `dashboard/src/`: `components/{layout,modals,ui}/`, `pages/`, `store/`, `hooks/`, `lib/`
-
-### 3. n8n workflows — `n8n_workflows/`
-- `smart_video_pipeline.json` — webhook to produce a video (auto-pulls topic from trend engine if not supplied)
-- `trend_refresh.json` — every 4h, refresh trend signals per active avatar
-- `nightly_learning.json` — every 03:00, run `learning_system.analyze_all_active`
-- `daily_content_pipeline.json`, `engagement_poller.json`, `weekly_evolution.json` (existing schedulers)
-
-Run inside the `viral_n8n` container at `:5678`.
-
-### 4. DB migrations — `infra/migrations/`
-Run in order in Supabase SQL editor: `001` … `008` (existing) then **`009_brand_identity_and_learning.sql`** which adds `music_genre`, `brand_identity` JSONB DNA per avatar, `visual_director_plan` on videos, plus tables: `trend_signals`, `learning_facts`, `avatar_pipeline_runs`, `music_tracks`.
-
-### 5. Tests — `tests/`
-`test_avatar_image.py`, `test_scheduler.py`.
-
-## Running the stack
-
-```bash
-docker compose up --build   # api + worker + redis + postgres + n8n + dashboard
+```
+botcraft/
+├── dashboard/              React app (Vite) — user-facing UI
+│   └── src/
+│       ├── BotCraftPage.jsx, BotCraftData.jsx   main page + hooks
+│       ├── components/                          NewAvatarModal, AvatarDetailModal,
+│       │                                        VideoPreviewModal, VoicePicker,
+│       │                                        LanguagePicker, AvatarCommandInput, ChatWidget
+│       ├── pages/                               routes (Overview, Avatars, Videos, …)
+│       └── lib/api.js                           supabase client
+├── supabase/
+│   ├── functions/          Edge Functions (each in its own folder)
+│   │   ├── create-avatar         persona + portrait → Storage
+│   │   ├── produce-video         user-initiated or scheduler-tick cron
+│   │   ├── process-video-queue   stage-tracked pipeline (script/audio/thumbnail)
+│   │   ├── direct-video          THE AI DIRECTOR — single LLM call orchestrates the plan
+│   │   ├── find-viral-topic      on-demand trend lookup (YouTube + LLM ranking)
+│   │   ├── learn-all             nightly: analytics → learning_facts
+│   │   ├── poll-stats            per-video analytics from platforms
+│   │   ├── generate-blueprint    production blueprint (DNA → script template)
+│   │   ├── update-blueprint      user edits via chat or UI
+│   │   ├── avatar-command        user "make it funnier" → command stored, applied next video
+│   │   ├── voice-preview, match-voices   voice picker helpers
+│   │   ├── proxy-image           bypass Pollinations CORS for the dashboard
+│   │   ├── publish-video         marks ready → posted (platform-API stubs)
+│   │   ├── discard-video         user rejects, status → discarded
+│   │   └── ingest-file           PDF/text → chunks + embeddings → avatar_memory
+│   └── migrations/         schema (run with `supabase db push`)
+├── infra/migrations/       legacy pre-supabase migrations (kept for reference)
+├── docs/                   architecture notes
+├── vercel.json             routes /api/* → Supabase Functions
+└── .env / .env.example     SUPABASE_*, GROQ_API_KEY, HUGGINGFACE_API_KEY, YOUTUBE_API_KEY, …
 ```
 
-Ports: dashboard `3000`, FastAPI `8000` (`/docs` for Swagger), n8n `5678`, redis `6379`, postgres only inside the network.
+## Database — key tables
 
-`.env` exists in the repo root (don't read its contents — see `.env.example` for required keys).
+- **avatars** — persona DNA (name, niche, language, life_story, brand_identity JSONB, image_url to Storage, voice_id with `browser:` / `poll:` / ElevenLabs prefix, production_blueprint, music_genre, schedules).
+- **videos** — pipeline rows. Status: `queued → processing → ready_for_review → posted | discarded | failed`. Has `topic`, `script`, `audio_url`, `thumbnail_url`, `directors_plan` JSONB, `viral_score`, `currently_in` (live pipeline stage), `stage_error`, `error_message`, `render_options.stages` (per-stage timestamp).
+- **video_queue** — work to do (consumed by `process-video-queue`).
+- **video_analytics** — per-video per-platform stats, polled.
+- **trend_signals** — cached viral topics per avatar.
+- **learning_facts** — patterns extracted from past performance.
+- **avatar_memory** — long-term RAG store, pgvector 384-dim embeddings.
+- **channels** — per-avatar platform connections (OAuth tokens, publish enable).
+- **campaigns / campaign_offers / payouts** — advertiser marketplace.
+- **user_plans / usage_credits** — quotas, tier, monthly credit bucket. Auto-granted on signup.
 
-## Provider chain (free tier)
+RLS is on for everything. Service role bypasses; users see only their own rows.
 
-| Stage    | Primary       | Fallback                     | Free quota                    |
-|----------|---------------|------------------------------|-------------------------------|
-| TTS      | ElevenLabs    | Edge TTS (free, unlimited)   | 10k chars/month               |
-| Image    | Pollinations  | HuggingFace inference        | unrestricted (be polite)      |
-| Lipsync  | D-ID          | Fal.ai SadTalker             | 5 min/month                   |
-| B-roll   | Pexels videos | —                            | 200 req/hour                  |
-| Music    | Pixabay       | —                            | 100 req/min                   |
-| Assembly | Creatomate    | local FFmpeg simple-mux      | tier credits/month            |
-| Trends   | YouTube + Google Trends + LLM ranking | — | 10k YT units/day            |
+## The Pipeline (how a video gets made)
 
-## Gotchas already fixed (don't re-introduce)
+1. User clicks **Produce now** in the dashboard.
+2. `produce-video` inserts a row in `videos` (status=queued), enqueues to `video_queue`, fires-and-forgets a call to `process-video-queue`.
+3. `process-video-queue` flips status to `processing`, sets `currently_in='director'`, calls `direct-video`.
+4. `direct-video` is the AI Director: one Groq call combining avatar DNA + last 5 videos' viral_scores + top 3 YouTube refs for this niche → returns full plan (hook, sections, CTA, music, thumbnail, viral_score). Saved to `videos.directors_plan`.
+5. Back in `process-video-queue`: `currently_in` flows `script → audio → thumbnail → finalizing`, each stage timestamped in `render_options.stages`. Audio uses browser SpeechSynthesis if `voice_id` starts with `browser:`, else Pollinations or ElevenLabs.
+6. Status flips to `ready_for_review`. Realtime pings the dashboard; user reviews and clicks Publish or Discard.
 
-- **`httpx` must stay `<0.28`** — supabase 2.10.0 caps it. `requirements.txt` is pinned to `httpx==0.27.2`.
-- **Worker must run as a module**, not as a script. `docker-compose.yml` runs `python -u -m tasks.video_worker`.
-- **No Colab anymore.** Removed `services/colab_client.py`, `services/video_orchestrator.py`, `colab/` folder, `COLAB_*_URL` env vars, `/admin/colab-urls` endpoint, `/colab/health` endpoint. The new pipeline lives in `services/video_pipeline.py` and is driven by free-tier provider modules under `services/providers/`.
+If anything throws, `status=failed`, `stage_error=<stage>`, `error_message=[stage] <msg>`. Granular debugging built in.
+
+## Running
+
+```bash
+cd dashboard && npm install && npm run dev    # Vite on :3000
+```
+
+Production frontend deploys automatically to Vercel from `main`.
+Edge Functions deploy via `supabase functions deploy <name> --no-verify-jwt`.
+Migrations apply via `supabase db push` (linked project: `unhorjseqvqmeoaqajnc`).
 
 ## Conventions
 
-- Logs are structlog JSON. Use `core.logging.get_logger(__name__)`.
-- LLM calls go through `core.llm_router` — never call providers directly from routers/services.
-- All notifications go through `core/notify.py` (writes to DB + SSE broadcast + web push). Don't re-introduce a Discord shim.
-- Per-avatar brand DNA lives at `avatars.brand_identity` (JSONB). Music genre + visual style + color palette + animation preferences all sit there.
-- Every video persists a `visual_director_plan` JSONB describing scene-by-scene zoom/clips/music volume/transitions.
-- Schedules are per-avatar; saving a schedule must call `AvatarScheduler.reload_avatar(id)`.
-- All times Asia/Jerusalem.
+- **No FastAPI, no Docker, no Redis, no n8n.** All async work is Supabase Edge Functions + pg_cron + Realtime.
+- **LLM routing** is per-function (each picks Groq → Gemini → fallback). No central llm_router service.
+- **Logs:** `console.log` in Edge Functions → Supabase dashboard.
+- **Times** in Asia/Jerusalem on the UI; ISO 8601 / UTC in the DB.
+- **All user-facing copy** has EN + HE in `STRINGS` (BotCraftData.jsx).
+- **Edge Function naming:** kebab-case folder = function name.
+- **Stage tracking:** every long pipeline writes `currently_in` + `render_options.stages.<stage_name>` timestamps so the UI can show a live progress bar.
