@@ -144,6 +144,11 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
         palette: form.palette || null,
         image_seed: imageSeed,
         generate_image: true,
+        // Lock in the exact persona shown in the preview so the saved
+        // avatar's portrait matches what the user just approved.
+        life_story: preview?.life_story || null,
+        physical_description: preview?.physical_description || null,
+        short_bio: preview?.bio || null,
       })
       onSuccess?.(result.avatar)
       resetForm()

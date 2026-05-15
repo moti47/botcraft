@@ -27,6 +27,11 @@ interface RequestBody {
   image_seed?: number;
   preview_only?: boolean;
   generate_image?: boolean;
+  // Locked-in values from a previous preview. When supplied, save skips the
+  // life-story LLM call so the persisted avatar matches the preview exactly.
+  life_story?: string | null;
+  physical_description?: string | null;
+  short_bio?: string | null;
 }
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
@@ -432,9 +437,18 @@ serve(async (req: Request) => {
     // Fill missing fields via LLM (or fallbacks) → name, music, palette
     const persona = await fillMissingFields(body);
 
-    // Generate life story (multi-paragraph biography in UI language)
-    // + physical_description (English) used to drive the portrait
-    const story = await generateLifeStory(body, persona.name);
+    // If the caller already has a life-story + physical_description from a
+    // preview, USE THEM AS-IS. This keeps "preview → save" producing the
+    // identical image (same prompt + same seed → same portrait). Without
+    // this, a fresh LLM call would draw different random diversity factors
+    // and the saved avatar would look unlike the preview.
+    const story = (body.life_story && body.physical_description)
+      ? {
+          life_story: body.life_story,
+          physical_description: body.physical_description,
+          short_bio: body.short_bio || body.bio || `Your daily dose of ${niche}.`,
+        }
+      : await generateLifeStory(body, persona.name);
 
     // Build portrait — always realistic, driven by physical_description.
     // For preview_only we keep the raw Pollinations URL (faster, no storage
