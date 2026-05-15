@@ -1,13 +1,16 @@
 /**
- * NewAvatarModal — clean two-column avatar creation
+ * NewAvatarModal — two-step avatar creation
  *
- * Left:  Live portrait preview (auto-generates as you type)
- * Right: Two boxes
- *   - 👤 Personal Details (name, bio, custom instructions)
- *   - 🎨 Edit Style (tone, music, color palette)
+ * Step 1: User picks niche + language + tone + custom instructions.
+ *         Clicks "✨ Generate persona info" → LLM fills name, bio, life story,
+ *         and physical description into EDITABLE text fields. No image yet.
  *
- * Niche + Language are the only required fields at top.
- * Preview regenerates automatically (debounced) when any field changes.
+ * Step 2: User reviews / edits the text. Clicks "🎨 Generate portrait" →
+ *         image is drawn from the (possibly edited) physical_description +
+ *         a locked seed. User can click again for a different angle (new seed)
+ *         without re-rolling the persona text.
+ *
+ * Step 3: "💾 Save avatar" persists exactly what's on screen.
  */
 
 import React, { useState, useEffect, useRef } from 'react'
@@ -67,46 +70,80 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
     language: 'EN',
     name: '',
     bio: '',
+    life_story: '',
+    physical_description: '',
     tone: 'engaging',
     music_genre: '',
     custom_instructions: '',
     palette: null,  // null = AI picks
   })
-  const [preview, setPreview] = useState(null)
+  // imageUrl & imageSeed track the portrait separately from form text, so
+  // editing text doesn't blow away the image until the user clicks regen.
+  const [imageUrl, setImageUrl] = useState(null)
   const [imageSeed, setImageSeed] = useState(null)
-  const debounceTimer = useRef(null)
-  const lastPreviewKey = useRef(null)
+  // Flag the "image is stale" — text changed since the last portrait gen.
+  const [imageStale, setImageStale] = useState(false)
 
   const previewMutation = useAvatarPreview()
   const createMutation = useCreateAvatar()
 
-  const update = (field) => (e) =>
-    setForm((f) => ({ ...f, [field]: e?.target?.value !== undefined ? e.target.value : e }))
+  const update = (field) => (e) => {
+    const value = e?.target?.value !== undefined ? e.target.value : e
+    setForm((f) => ({ ...f, [field]: value }))
+    // If user edits any text that drives the portrait, mark the current
+    // image as stale so they know to re-generate.
+    if (['name', 'physical_description', 'tone', 'palette', 'custom_instructions'].includes(field)) {
+      setImageStale(true)
+    }
+  }
 
-  // ── AUTO PREVIEW (debounced)
-  // Generates a fresh preview when niche/name/custom_instructions/tone change
-  useEffect(() => {
-    if (!isOpen || !form.niche.trim() || form.niche.length < 2) return
-    const key = JSON.stringify({
-      n: form.niche, name: form.name, bio: form.bio,
-      tone: form.tone, ci: form.custom_instructions, p: form.palette,
-    })
-    if (key === lastPreviewKey.current) return
-
-    if (debounceTimer.current) clearTimeout(debounceTimer.current)
-    debounceTimer.current = setTimeout(() => {
-      lastPreviewKey.current = key
-      generatePreview(false)
-    }, 800)
-    return () => clearTimeout(debounceTimer.current)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [form.niche, form.name, form.bio, form.tone, form.custom_instructions, form.palette, isOpen])
-
-  const generatePreview = async (newSeed = false) => {
+  // STEP 1: Generate persona text into the editable fields (no image).
+  const generateInfo = async () => {
     if (!form.niche.trim()) return
-    const seed = newSeed ? Math.floor(Math.random() * 1_000_000) : (imageSeed ?? Math.floor(Math.random() * 1_000_000))
-    if (newSeed || !imageSeed) setImageSeed(seed)
+    try {
+      const result = await previewMutation.mutateAsync({
+        niche: form.niche,
+        language: form.language,
+        ui_language: uiLanguage,
+        name: form.name || null,
+        bio: form.bio || null,
+        tone: form.tone,
+        avatar_style: 'realistic',
+        music_genre: form.music_genre || null,
+        custom_instructions: form.custom_instructions || null,
+        palette: form.palette || null,
+        generate_image: false,   // ← text only, no Pollinations call
+      })
+      const p = result.preview || {}
+      // Fill empty fields, but DON'T overwrite anything the user already typed.
+      setForm((f) => ({
+        ...f,
+        name:                 f.name || p.name || '',
+        bio:                  f.bio || p.bio || '',
+        life_story:           f.life_story || p.life_story || '',
+        physical_description: f.physical_description || p.physical_description || '',
+        music_genre:          f.music_genre || p.music_genre || '',
+        palette:              f.palette || p.brand_identity?.palette || null,
+      }))
+      setImageStale(true)  // text just changed — portrait (if any) is now stale
+    } catch (err) {
+      console.error('Generate info failed:', err)
+    }
+  }
 
+  // STEP 2: Generate (or regenerate) the portrait from the current form text.
+  // Re-uses the existing physical_description and locks a seed so the user
+  // can iterate on angles without losing the persona text.
+  const generatePortrait = async (newSeed = false) => {
+    if (!form.niche.trim()) return
+    if (!form.physical_description.trim()) {
+      // No description yet — generate persona text first, then portrait
+      await generateInfo()
+    }
+    const seed = newSeed || !imageSeed
+      ? Math.floor(Math.random() * 1_000_000)
+      : imageSeed
+    setImageSeed(seed)
     try {
       const result = await previewMutation.mutateAsync({
         niche: form.niche,
@@ -121,10 +158,15 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
         palette: form.palette || null,
         image_seed: seed,
         generate_image: true,
+        // Lock in EXACTLY what's in the form so the image matches the text
+        life_story: form.life_story || null,
+        physical_description: form.physical_description || null,
+        short_bio: form.bio || null,
       })
-      setPreview(result.preview)
+      setImageUrl(result.preview?.image_url || null)
+      setImageStale(false)
     } catch (err) {
-      console.error('Preview failed:', err)
+      console.error('Generate portrait failed:', err)
     }
   }
 
@@ -135,20 +177,20 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
         niche: form.niche,
         language: form.language,
         ui_language: uiLanguage,
-        name: preview?.name || form.name || null,
-        bio: preview?.bio || form.bio || null,
+        name: form.name || null,
+        bio: form.bio || null,
         tone: form.tone,
         avatar_style: 'realistic',
-        music_genre: form.music_genre || preview?.music_genre || null,
+        music_genre: form.music_genre || null,
         custom_instructions: form.custom_instructions || null,
         palette: form.palette || null,
         image_seed: imageSeed,
-        generate_image: true,
-        // Lock in the exact persona shown in the preview so the saved
-        // avatar's portrait matches what the user just approved.
-        life_story: preview?.life_story || null,
-        physical_description: preview?.physical_description || null,
-        short_bio: preview?.bio || null,
+        generate_image: !!imageUrl,   // only ask for image if one was generated
+        // Lock in the exact persona shown so the saved avatar's portrait
+        // matches the preview the user approved.
+        life_story: form.life_story || null,
+        physical_description: form.physical_description || null,
+        short_bio: form.bio || null,
       })
       onSuccess?.(result.avatar)
       resetForm()
@@ -161,11 +203,12 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
   const resetForm = () => {
     setForm({
       niche: '', language: 'EN', name: '', bio: '',
+      life_story: '', physical_description: '',
       tone: 'engaging', music_genre: '', custom_instructions: '', palette: null,
     })
-    setPreview(null)
+    setImageUrl(null)
     setImageSeed(null)
-    lastPreviewKey.current = null
+    setImageStale(false)
   }
 
   const handleClose = () => { resetForm(); onClose() }
@@ -173,7 +216,7 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
   if (!isOpen) return null
 
   const isWorking = previewMutation.isPending || createMutation.isPending
-  const hasContent = !!(preview?.image_url || previewMutation.isPending || form.niche)
+  const hasPersonaText = !!(form.name || form.life_story || form.physical_description)
 
   return (
     <div
@@ -210,7 +253,7 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
               🎭 Create avatar
             </h2>
             <p style={{ margin: '4px 0 0', fontSize: '12px', color: 'var(--text-muted)' }}>
-              The portrait updates automatically as you type. Customize, or let AI decide.
+              Step 1: generate persona info. Step 2: edit if you want. Step 3: generate portrait.
             </p>
           </div>
           <button type="button" onClick={handleClose} style={closeBtnStyle}>×</button>
@@ -267,8 +310,8 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
               position: 'relative',
               boxShadow: preview?.image_url ? 'var(--shadow-md)' : 'none',
             }}>
-              {preview?.image_url ? (
-                <PreviewImage src={proxyImage(preview.image_url)} />
+              {imageUrl ? (
+                <PreviewImage src={proxyImage(imageUrl)} />
               ) : (
                 <div style={{
                   position: 'absolute', inset: 0,
@@ -285,91 +328,109 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
                         borderRadius: '50%',
                         animation: 'spin 1s linear infinite',
                       }} />
-                      <span>AI is generating portrait...</span>
-                      <span style={{ fontSize: 10, opacity: 0.7 }}>5-30 seconds on first try</span>
+                      <span>AI is generating...</span>
                       <style>{`@keyframes spin { to { transform: rotate(360deg) } }`}</style>
                     </>
                   ) : !form.niche ? (
                     <>
                       <div style={{ fontSize: 32, opacity: 0.5 }}>🎭</div>
-                      <span>Enter niche above to start</span>
+                      <span>Enter niche → generate info → generate portrait</span>
+                    </>
+                  ) : !hasPersonaText ? (
+                    <>
+                      <div style={{ fontSize: 28, opacity: 0.6 }}>📝</div>
+                      <span>Click "Generate persona info" first</span>
                     </>
                   ) : (
-                    <span>Preparing...</span>
+                    <>
+                      <div style={{ fontSize: 28, opacity: 0.6 }}>🎨</div>
+                      <span>Click "Generate portrait" below</span>
+                    </>
                   )}
                 </div>
               )}
+
+              {/* Stale indicator overlay */}
+              {imageUrl && imageStale && (
+                <div style={{
+                  position: 'absolute', top: 8, right: 8,
+                  padding: '4px 8px',
+                  background: 'rgba(0,0,0,0.6)',
+                  color: '#FCD34D', fontSize: 10, fontWeight: 700,
+                  borderRadius: 'var(--radius-sm)',
+                }}>⚠️ text changed</div>
+              )}
             </div>
 
-            {/* === BIG Regenerate button === */}
+            {/* === STEP 1: Generate persona info === */}
             <button
               type="button"
-              onClick={() => generatePreview(true)}
+              onClick={generateInfo}
               disabled={!form.niche.trim() || isWorking}
               style={{
                 width: '100%',
                 marginTop: 10,
+                padding: '11px',
+                background: hasPersonaText ? 'var(--surface)' : 'var(--brand-gradient)',
+                color: hasPersonaText ? 'var(--text)' : '#fff',
+                border: hasPersonaText ? '1px solid var(--border)' : 'none',
+                borderRadius: 'var(--radius-md)',
+                fontSize: 12,
+                fontWeight: 700,
+                cursor: form.niche.trim() && !isWorking ? 'pointer' : 'not-allowed',
+                opacity: form.niche.trim() && !isWorking ? 1 : 0.5,
+                boxShadow: hasPersonaText ? 'none' : 'var(--shadow-glow)',
+              }}
+            >
+              {previewMutation.isPending && !imageUrl
+                ? '⏳ Thinking...'
+                : hasPersonaText
+                ? '🔁 Regenerate persona info'
+                : '✨ Generate persona info'}
+            </button>
+
+            {/* === STEP 2: Generate portrait === */}
+            <button
+              type="button"
+              onClick={() => generatePortrait(!!imageUrl)}
+              disabled={!form.niche.trim() || isWorking}
+              style={{
+                width: '100%',
+                marginTop: 8,
                 padding: '12px',
-                background: previewMutation.isPending
-                  ? 'var(--surface-2)'
-                  : 'var(--brand-gradient)',
-                color: previewMutation.isPending ? 'var(--text-muted)' : '#fff',
+                background: hasPersonaText
+                  ? 'var(--brand-gradient)'
+                  : 'var(--surface-2)',
+                color: hasPersonaText ? '#fff' : 'var(--text-muted)',
                 border: 'none',
                 borderRadius: 'var(--radius-md)',
                 fontSize: 13,
                 fontWeight: 700,
                 cursor: form.niche.trim() && !isWorking ? 'pointer' : 'not-allowed',
                 opacity: form.niche.trim() && !isWorking ? 1 : 0.5,
-                boxShadow: previewMutation.isPending ? 'none' : 'var(--shadow-glow)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6,
+                boxShadow: hasPersonaText && !imageUrl ? 'var(--shadow-glow)' : 'none',
               }}
             >
-              {previewMutation.isPending ? '⏳ Generating...' : '🔄 Regenerate portrait'}
+              {previewMutation.isPending && hasPersonaText
+                ? '⏳ Drawing portrait...'
+                : imageUrl
+                ? '🔄 New angle (same persona)'
+                : '🎨 Generate portrait'}
             </button>
             <div style={{ fontSize: 10, color: 'var(--text-dim)', textAlign: 'center', marginTop: 4 }}>
-              Click until you get one you love
-            </div>
-
-            <div style={{ marginTop: 8 }}>
-
-              {preview?.name && (
-                <div style={{
-                  padding: 10,
-                  background: 'var(--surface-2)',
-                  borderRadius: 'var(--radius-sm)',
-                  fontSize: 11,
-                }}>
-                  <div style={{ fontWeight: 700, color: 'var(--text)', fontSize: 13 }}>{preview.name}</div>
-                  {preview.bio && (
-                    <div style={{ color: 'var(--text-muted)', marginTop: 4, lineHeight: 1.4 }}>
-                      {preview.bio}
-                    </div>
-                  )}
-                  {preview.life_story && (
-                    <details style={{ marginTop: 6 }}>
-                      <summary style={{ cursor: 'pointer', color: 'var(--primary)', fontWeight: 600 }}>
-                        📖 Read life story
-                      </summary>
-                      <p style={{
-                        marginTop: 6, fontSize: 11, color: 'var(--text-muted)',
-                        lineHeight: 1.5, whiteSpace: 'pre-line',
-                      }}>{preview.life_story}</p>
-                    </details>
-                  )}
-                </div>
-              )}
+              Step 1: fill the text. Step 2: draw the face.
             </div>
           </div>
 
           {/* === RIGHT: Two boxes === */}
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             {/* === BOX 1: Personal Details === */}
-            <Box title="👤 Personal Details" subtitle="Let AI invent or write your own">
-              <Field label="Name" hint="blank → AI invents">
+            <Box title="👤 Personal Details" subtitle="Generated by AI, fully editable">
+              <Field label="Name" hint="edit freely">
                 <input type="text" placeholder="TechTom..." value={form.name} onChange={update('name')} style={inputStyle} />
               </Field>
 
-              <Field label="Bio" hint="blank → AI writes">
+              <Field label="Bio" hint="one-line tagline">
                 <textarea
                   placeholder="Short personality description"
                   value={form.bio}
@@ -379,7 +440,27 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
                 />
               </Field>
 
-              <Field label="Custom AI instructions" hint="free-form — anything">
+              <Field label="Life story" hint="multi-paragraph backstory in chosen language">
+                <textarea
+                  placeholder="Click ✨ Generate persona info to fill"
+                  value={form.life_story}
+                  onChange={update('life_story')}
+                  rows={5}
+                  style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.5 }}
+                />
+              </Field>
+
+              <Field label="Physical description (English)" hint="drives the portrait — edit to change the face">
+                <textarea
+                  placeholder="32-year-old East Asian woman with short black hair, hazel eyes, modern hoodie..."
+                  value={form.physical_description}
+                  onChange={update('physical_description')}
+                  rows={3}
+                  style={{ ...inputStyle, resize: 'vertical', fontFamily: 'inherit', lineHeight: 1.4 }}
+                />
+              </Field>
+
+              <Field label="Custom AI instructions" hint="anything else for the LLM to know">
                 <textarea
                   placeholder="e.g. 'wears glasses, sounds like a sarcastic millennial'"
                   value={form.custom_instructions}
