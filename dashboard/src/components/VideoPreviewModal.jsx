@@ -36,13 +36,49 @@ const SCENE_ANIMATIONS = {
   default:           'sceneFade',
 }
 
-// Caption styles — Director can pick one per video; we apply the matching class.
-const CAPTION_STYLES = {
-  highlighted_word_yellow:  'cap-yellow',
-  kinetic_bouncing:         'cap-bouncy',
-  bold_outline:             'cap-bold-outline',
-  gradient_pop:             'cap-gradient',
-  none:                     '',
+// 8 caption styles — each avatar gets ONE deterministically (so the same
+// avatar always uses the same style; viewers learn to recognize the look).
+// Each style is a different (font, color, weight, decoration) combination
+// tuned for short-form viral video.
+const CAPTION_PRESETS = [
+  { id: 'yellow_classic',  font: '"Anton", "Impact", sans-serif',         size: 30, weight: 700, base: '#FFFFFF', active: '#000', activeBg: '#FBBF24',  letter: '0.5px', italic: false },
+  { id: 'pink_neon',       font: '"Bebas Neue", "Impact", sans-serif',    size: 32, weight: 700, base: '#FFFFFF', active: '#FF2DC1', activeBg: 'transparent', letter: '1.5px', italic: false, glow: '0 0 18px #FF2DC1' },
+  { id: 'lime_stamp',      font: '"Permanent Marker", cursive',           size: 28, weight: 400, base: '#FFFFFF', active: '#000', activeBg: '#A3E635', letter: '0.5px', italic: false },
+  { id: 'gradient_sunset', font: '"Bowlby One", "Impact", sans-serif',    size: 30, weight: 700, base: '#FFFFFF', active: 'gradient', activeBg: 'transparent', letter: '0.5px', italic: false, gradient: 'linear-gradient(135deg, #FBBF24, #EF4444)' },
+  { id: 'cyber_cyan',      font: '"Black Ops One", "Impact", sans-serif', size: 28, weight: 400, base: '#FFFFFF', active: '#22D3EE', activeBg: 'transparent', letter: '2px',   italic: false, glow: '0 0 20px #22D3EE' },
+  { id: 'red_stamp',       font: '"Anton", "Impact", sans-serif',         size: 30, weight: 700, base: '#FFFFFF', active: '#FFF',  activeBg: '#EF4444', letter: '0.5px', italic: false, rotate: -2 },
+  { id: 'purple_glow',     font: '"Bebas Neue", sans-serif',              size: 32, weight: 700, base: '#FFFFFF', active: '#C084FC', activeBg: 'transparent', letter: '1.5px', italic: false, glow: '0 0 22px #A855F7' },
+  { id: 'mono_block',      font: '"JetBrains Mono", monospace',           size: 24, weight: 800, base: '#FFFFFF', active: '#000', activeBg: '#10B981', letter: '0px', italic: false },
+]
+
+// Deterministic hash from avatar id → caption preset
+function pickCaptionPreset(avatarId, niche) {
+  const seed = String(avatarId || niche || 'x')
+  let h = 0
+  for (let i = 0; i < seed.length; i++) h = ((h << 5) - h + seed.charCodeAt(i)) | 0
+  return CAPTION_PRESETS[Math.abs(h) % CAPTION_PRESETS.length]
+}
+
+// Chunk a sentence into ~3-4 word phrases, breaking on natural pauses
+// (commas, periods, conjunctions) so each chunk is a visual unit the
+// viewer can read in one glance.
+function chunkText(text) {
+  if (!text) return []
+  const words = text.trim().replace(/\s+/g, ' ').split(' ')
+  if (words.length === 0) return []
+  const out = []
+  let cur = []
+  const naturalBreak = (w) => /[,.!?:;—]$/.test(w)
+  for (const w of words) {
+    cur.push(w)
+    const len = cur.length
+    if ((len >= 3 && naturalBreak(w)) || len >= 4) {
+      out.push(cur.join(' '))
+      cur = []
+    }
+  }
+  if (cur.length) out.push(cur.join(' '))
+  return out
 }
 
 const PLATFORMS = [
@@ -61,7 +97,7 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
       if (!videoId) return null
       const { data } = await supabase
         .from('videos')
-        .select('*, avatars(name, image_url, niche, voice_id)')
+        .select('*, avatars(id, name, image_url, niche, voice_id)')
         .eq('id', videoId)
         .single()
       return data
@@ -94,6 +130,10 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
   const playStartRef = useRef(0)           // wall-clock ms when play began
   const playStartPlayhead = useRef(0)      // playheadSec when play began
   const spokenScenes = useRef(new Set())   // scene ids that already triggered TTS
+  // The REAL word index TTS is currently speaking (from onboundary). Reset
+  // each time a new scene starts. Falls back to time-based estimate when
+  // the browser doesn't emit boundary events.
+  const [ttsWordIdx, setTtsWordIdx] = useState(0)
 
   const voiceId = video?.avatars?.voice_id || ''
   const useBrowserTTS = voiceId.startsWith('browser:')
@@ -258,11 +298,36 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
     ? Math.floor(sceneTime / CUT_INTERVAL_SEC) % sceneBrollClips.length
     : 0
   const sceneBrollClip = sceneBrollClips[clipCycle] || null
-  // Word highlighting estimated from sceneTime (no need for TTS boundary events)
+  // Word highlight: prefer the real TTS boundary index; fall back to a
+  // time-based estimate if the browser doesn't fire boundary events.
   const sceneWordCount = scene ? (scene.text || '').trim().split(/\s+/).length : 0
-  const currentWord = scene
+  const timeEstimateWord = scene
     ? Math.min(sceneWordCount, Math.floor((sceneTime / scene.duration_sec) * sceneWordCount))
     : 0
+  const currentWord = ttsWordIdx > 0 ? ttsWordIdx : timeEstimateWord
+
+  // Chunk the current scene's text into 3-4 word phrases. Only the chunk
+  // containing the active word is shown on screen — never a whole sentence.
+  const sceneChunks = React.useMemo(() => chunkText(scene?.text || ''), [scene?.id, scene?.text])
+  // Map currentWord → which chunk + word offset within chunk
+  const { activeChunkIdx, wordInChunk } = React.useMemo(() => {
+    let consumed = 0
+    for (let i = 0; i < sceneChunks.length; i++) {
+      const len = sceneChunks[i].split(/\s+/).length
+      if (currentWord <= consumed + len) {
+        return { activeChunkIdx: i, wordInChunk: Math.max(0, currentWord - consumed - 1) }
+      }
+      consumed += len
+    }
+    return { activeChunkIdx: Math.max(0, sceneChunks.length - 1), wordInChunk: 0 }
+  }, [sceneChunks, currentWord])
+  const activeChunkText = sceneChunks[activeChunkIdx] || ''
+
+  // Pick the caption style for this avatar (deterministic by id, so consistent)
+  const captionPreset = React.useMemo(
+    () => pickCaptionPreset(video?.avatars?.id || video?.avatar_id, video?.avatars?.niche),
+    [video?.avatars?.id, video?.avatar_id, video?.avatars?.niche],
+  )
 
   // Whenever playhead crosses into a new scene, speak its text. We use a
   // ref-set to ensure we only fire TTS once per scene per play-through.
@@ -274,6 +339,8 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
     if (sceneIndex === 0) sfx.thump()
     else if (scene.kind === 'avatar') sfx.ding()
     else sfx.whoosh()
+    // Reset boundary index so the new scene's word highlight starts at 0
+    setTtsWordIdx(0)
     // Speak the text
     const text = scene.text || ''
     if (useBrowserTTS && 'speechSynthesis' in window && text) {
@@ -287,6 +354,16 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
       // Match TTS rate to scene duration so words finish around the visual end
       const naturalDur = (text.trim().split(/\s+/).length || 1) / WORDS_PER_SECOND
       utter.rate = Math.max(0.6, Math.min(1.6, naturalDur / scene.duration_sec))
+      // The boundary event is what makes the yellow highlight TRACK the real
+      // speech instead of being a time-based estimate. Chrome/Edge support
+      // it reliably; Firefox doesn't always — the time estimate is the
+      // fallback (handled in currentWord above).
+      utter.onboundary = (ev) => {
+        if (ev.name !== 'word' && ev.name !== undefined) return
+        const upto = text.slice(0, ev.charIndex).trim()
+        const idx = upto ? upto.split(/\s+/).length : 0
+        setTtsWordIdx(idx + 1)
+      }
       window.speechSynthesis.cancel()
       window.speechSynthesis.speak(utter)
     }
@@ -619,51 +696,32 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                     />
                   )}
 
-                  {/* === LAYER 2: viral kinetic captions (word-by-word highlight) === */}
-                  {isPlaying && scene && (
-                    <div
-                      key={`cap-${sceneIndex}`}
-                      className={captionClass}
-                      style={{
-                        position: 'absolute', left: 0, right: 0, bottom: '10%',
-                        padding: '0 22px',
-                        textAlign: 'center',
-                        animation: 'captionDrop 420ms cubic-bezier(0.22,1,0.36,1)',
-                        pointerEvents: 'none',
-                      }}
-                    >
+                  {/* === LAYER 2: viral chunked captions (3-4 words at a time) === */}
+                  {isPlaying && activeChunkText && (
+                    <CaptionLine
+                      key={`chunk-${sceneIndex}-${activeChunkIdx}`}
+                      text={activeChunkText}
+                      activeWord={wordInChunk}
+                      preset={captionPreset}
+                    />
+                  )}
+                  {/* Optional overlay graphic (Director's "stat:24%" etc.) */}
+                  {isPlaying && scene?.overlay && (
+                    <div style={{
+                      position: 'absolute', left: 0, right: 0, top: '14%',
+                      textAlign: 'center', padding: '0 16px', pointerEvents: 'none',
+                    }}>
                       <div style={{
                         display: 'inline-block',
-                        fontSize: 26, fontWeight: 900,
-                        lineHeight: 1.2,
-                        color: '#fff',
-                        textShadow: '3px 3px 0 #000, -3px 3px 0 #000, 3px -3px 0 #000, -3px -3px 0 #000, 0 0 12px rgba(0,0,0,0.8)',
-                        letterSpacing: '0.5px',
-                        maxWidth: '92%',
+                        padding: '5px 12px',
+                        background: 'linear-gradient(135deg, #7C3AED, #06B6D4)',
+                        color: '#fff', fontSize: 12, fontWeight: 800,
+                        borderRadius: 999, letterSpacing: 0.5,
+                        boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
+                        animation: 'overlaySlide 380ms ease-out',
                       }}>
-                        {scene.text.split(/\s+/).map((w, i) => (
-                          <span key={i} className={`vp-cap-word ${i === currentWord ? 'active' : ''}`}>
-                            {w}
-                          </span>
-                        ))}
+                        {scene.overlay}
                       </div>
-                      {scene.overlay && (
-                        <div style={{
-                          marginTop: 12,
-                          display: 'inline-block',
-                          padding: '6px 14px',
-                          background: 'linear-gradient(135deg, #7C3AED, #06B6D4)',
-                          color: '#fff', fontSize: 13, fontWeight: 800,
-                          borderRadius: 999,
-                          letterSpacing: 0.5,
-                          textShadow: '0 1px 2px rgba(0,0,0,0.4)',
-                          boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
-                          animation: 'overlaySlide 450ms cubic-bezier(0.22,1,0.36,1)',
-                          transform: 'rotate(-3deg)',
-                        }}>
-                          {scene.overlay}
-                        </div>
-                      )}
                     </div>
                   )}
 
@@ -1548,6 +1606,81 @@ function Timeline({ scenes, playheadSec, totalDuration, onSeek, onEditScene, onS
           boxShadow: '0 0 6px rgba(255,255,255,0.8)',
           transform: 'translateX(-1px)',
         }} />
+      </div>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════
+// CaptionLine — renders ONE 3-4 word chunk in the avatar's caption style.
+// The active word in the chunk gets the preset's accent treatment.
+// ════════════════════════════════════════════════════════════
+function CaptionLine({ text, activeWord, preset }) {
+  const words = text.split(/\s+/)
+  return (
+    <div
+      style={{
+        position: 'absolute', left: 0, right: 0, bottom: '12%',
+        padding: '0 22px',
+        textAlign: 'center',
+        animation: 'captionDrop 280ms ease-out',
+        pointerEvents: 'none',
+      }}
+    >
+      <div style={{
+        display: 'inline-block',
+        fontFamily: preset.font,
+        fontSize: preset.size,
+        fontWeight: preset.weight,
+        fontStyle: preset.italic ? 'italic' : 'normal',
+        letterSpacing: preset.letter,
+        color: preset.base,
+        lineHeight: 1.2,
+        textShadow: '3px 3px 0 #000, -3px 3px 0 #000, 3px -3px 0 #000, -3px -3px 0 #000, 0 0 14px rgba(0,0,0,0.85)',
+        textTransform: preset.font.includes('Anton') || preset.font.includes('Bebas') || preset.font.includes('Black Ops') ? 'uppercase' : 'none',
+        maxWidth: '92%',
+      }}>
+        {words.map((w, i) => {
+          const isActive = i === activeWord
+          let activeStyle = {}
+          if (isActive) {
+            if (preset.active === 'gradient' && preset.gradient) {
+              activeStyle = {
+                backgroundImage: preset.gradient,
+                WebkitBackgroundClip: 'text',
+                backgroundClip: 'text',
+                color: 'transparent',
+                WebkitTextFillColor: 'transparent',
+                textShadow: 'none',
+                filter: 'drop-shadow(0 0 8px rgba(251,191,36,0.7))',
+              }
+            } else if (preset.activeBg !== 'transparent') {
+              activeStyle = {
+                background: preset.activeBg,
+                color: preset.active,
+                padding: '2px 7px',
+                borderRadius: 5,
+                ...(preset.rotate ? { display: 'inline-block', transform: `rotate(${preset.rotate}deg)` } : {}),
+              }
+            } else {
+              activeStyle = {
+                color: preset.active,
+                textShadow: preset.glow ? `${preset.glow}, 3px 3px 0 #000, -3px 3px 0 #000, 3px -3px 0 #000, -3px -3px 0 #000` : undefined,
+              }
+            }
+          }
+          return (
+            <span
+              key={i}
+              style={{
+                display: 'inline-block',
+                margin: '0 4px',
+                transition: 'all 120ms ease-out',
+                ...activeStyle,
+              }}
+            >{w}</span>
+          )
+        })}
       </div>
     </div>
   )

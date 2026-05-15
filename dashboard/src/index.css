@@ -1,3 +1,6 @@
+/* Google Fonts for the per-avatar caption styles in the video player */
+@import url('https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Permanent+Marker&family=Bowlby+One&family=Black+Ops+One&family=JetBrains+Mono:wght@800&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
