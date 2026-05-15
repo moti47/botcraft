@@ -33,7 +33,7 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
       if (!videoId) return null
       const { data } = await supabase
         .from('videos')
-        .select('*, avatars(name, image_url, niche)')
+        .select('*, avatars(name, image_url, niche, voice_id)')
         .eq('id', videoId)
         .single()
       return data
@@ -45,6 +45,59 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
       return status === 'processing' || status === 'queued' ? 3000 : false
     },
   })
+
+  // Player state: browser SpeechSynthesis when voice_id starts with browser:,
+  // otherwise the regular <audio> element wired to audio_url. We track
+  // isPlaying ourselves so the play button reflects reality.
+  const [isPlaying, setIsPlaying] = useState(false)
+  const audioRef = React.useRef(null)
+  const voiceId = video?.avatars?.voice_id || ''
+  const useBrowserTTS = voiceId.startsWith('browser:')
+  const browserVoiceName = useBrowserTTS ? voiceId.slice('browser:'.length) : null
+
+  // Stop any playback when the modal closes
+  useEffect(() => {
+    if (!isOpen) {
+      try { window.speechSynthesis?.cancel() } catch {/* ignore */}
+      if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
+      setIsPlaying(false)
+    }
+  }, [isOpen])
+
+  const playVideo = () => {
+    if (isPlaying) {
+      // Stop
+      try { window.speechSynthesis?.cancel() } catch {/* */}
+      if (audioRef.current) audioRef.current.pause()
+      setIsPlaying(false)
+      return
+    }
+    const text = (editedScript || video?.script || '').trim()
+    if (!text) return
+
+    if (useBrowserTTS && 'speechSynthesis' in window) {
+      const utter = new SpeechSynthesisUtterance(text)
+      // Try to find the voice the avatar was configured with; fall back to any voice in same lang
+      const voices = window.speechSynthesis.getVoices()
+      const match = voices.find((v) => v.name === browserVoiceName)
+              || voices.find((v) => v.name.toLowerCase().includes((browserVoiceName || '').toLowerCase()))
+              || voices.find((v) => v.lang?.startsWith((video?.render_options?.language || 'en').toLowerCase()))
+              || null
+      if (match) utter.voice = match
+      utter.rate = 1.0
+      utter.onend = () => setIsPlaying(false)
+      utter.onerror = () => setIsPlaying(false)
+      window.speechSynthesis.cancel()
+      window.speechSynthesis.speak(utter)
+      setIsPlaying(true)
+    } else if (audioRef.current) {
+      audioRef.current.play().catch((err) => {
+        console.error('audio playback failed:', err)
+        setIsPlaying(false)
+      })
+      setIsPlaying(true)
+    }
+  }
 
   useEffect(() => {
     if (video?.script) setEditedScript(video.script)
@@ -197,25 +250,80 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
               <DirectorPlanCard plan={video.directors_plan} viralScore={video.viral_score} />
             )}
             <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: '20px' }}>
-              {/* === Left: Thumbnail + Audio === */}
+              {/* === Left: Player (thumbnail with overlay play button + audio) === */}
               <div>
-                <div style={{
-                  width: '100%',
-                  aspectRatio: '9/16',
-                  borderRadius: 'var(--radius-md)',
-                  overflow: 'hidden',
-                  background: 'var(--surface-2)',
-                  border: '1px solid var(--border)',
-                  backgroundImage: video.thumbnail_url ? `url(${proxyImage(video.thumbnail_url)})` : undefined,
-                  backgroundSize: 'cover',
-                  backgroundPosition: 'center',
-                  position: 'relative',
-                  marginBottom: 12,
-                }}>
+                <style>{`
+                  @keyframes kenBurnsZoom {
+                    0%   { transform: scale(1.0)   translate(0,    0); }
+                    50%  { transform: scale(1.06)  translate(-1%, -1%); }
+                    100% { transform: scale(1.10)  translate(1%,   1%); }
+                  }
+                `}</style>
+                <div
+                  onClick={playVideo}
+                  style={{
+                    width: '100%',
+                    aspectRatio: '9/16',
+                    borderRadius: 'var(--radius-md)',
+                    overflow: 'hidden',
+                    background: 'var(--surface-2)',
+                    border: '1px solid var(--border)',
+                    position: 'relative',
+                    marginBottom: 12,
+                    cursor: 'pointer',
+                  }}
+                >
+                  {/* The thumbnail image (animated like Ken Burns during playback) */}
+                  {video.thumbnail_url && (
+                    <div
+                      style={{
+                        position: 'absolute', inset: 0,
+                        backgroundImage: `url(${proxyImage(video.thumbnail_url)})`,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center',
+                        animation: isPlaying ? 'kenBurnsZoom 12s ease-in-out infinite alternate' : 'none',
+                        transformOrigin: 'center',
+                      }}
+                    />
+                  )}
+                  {/* Caption strip when playing — gives a "watching a video" feel */}
+                  {isPlaying && (
+                    <div style={{
+                      position: 'absolute', left: 0, right: 0, bottom: 0,
+                      padding: '14px 16px',
+                      background: 'linear-gradient(180deg, transparent, rgba(0,0,0,0.85))',
+                      color: '#fff', fontSize: 14, fontWeight: 700,
+                      lineHeight: 1.35,
+                      textShadow: '0 2px 6px rgba(0,0,0,0.7)',
+                    }}>
+                      {video.directors_plan?.hook?.text || video.topic}
+                    </div>
+                  )}
+                  {/* Big play / pause button overlay */}
+                  <div style={{
+                    position: 'absolute', inset: 0,
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: isPlaying ? 'transparent' : 'rgba(0,0,0,0.25)',
+                    transition: 'background 200ms',
+                  }}>
+                    <div style={{
+                      width: 64, height: 64,
+                      borderRadius: '50%',
+                      background: isPlaying ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.95)',
+                      color: isPlaying ? '#fff' : '#000',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      fontSize: 28,
+                      boxShadow: '0 6px 24px rgba(0,0,0,0.4)',
+                      opacity: isPlaying ? 0.0 : 1.0,
+                      transition: 'opacity 200ms, background 200ms',
+                    }}>
+                      {isPlaying ? '⏸' : '▶'}
+                    </div>
+                  </div>
                   {!video.thumbnail_url && (
                     <div style={{
+                      position: 'absolute', inset: 0,
                       display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      width: '100%', height: '100%',
                       color: 'var(--text-muted)', fontSize: 12,
                     }}>
                       Loading thumbnail...
@@ -223,23 +331,44 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                   )}
                 </div>
 
-                {video.audio_url && (
-                  <div>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', marginBottom: 6 }}>
-                      🔊 Listen
-                    </div>
-                    <audio
-                      controls
-                      src={video.audio_url}
-                      style={{ width: '100%' }}
-                      preload="none"
-                    >
-                      Your browser doesn't support audio playback.
-                    </audio>
-                    <div style={{ fontSize: 10, color: 'var(--text-dim)', marginTop: 4 }}>
-                      Click play — audio is generated on first listen (~3s wait)
-                    </div>
-                  </div>
+                {/* Play / Stop button + voice label */}
+                <button
+                  onClick={playVideo}
+                  disabled={!video.script}
+                  style={{
+                    width: '100%',
+                    padding: '12px',
+                    background: isPlaying ? 'var(--danger-bg)' : 'var(--brand-gradient)',
+                    color: isPlaying ? 'var(--danger)' : '#fff',
+                    border: 'none',
+                    borderRadius: 'var(--radius-md)',
+                    fontSize: 13,
+                    fontWeight: 700,
+                    cursor: video.script ? 'pointer' : 'not-allowed',
+                    opacity: video.script ? 1 : 0.5,
+                    boxShadow: isPlaying ? 'none' : 'var(--shadow-glow)',
+                  }}
+                >
+                  {isPlaying ? '⏸ Stop' : '▶ Play video'}
+                </button>
+                <div style={{ fontSize: 10, color: 'var(--text-dim)', textAlign: 'center', marginTop: 4 }}>
+                  {useBrowserTTS
+                    ? `Voice: ${browserVoiceName} (browser)`
+                    : video.audio_url
+                    ? 'Streaming audio from Pollinations TTS'
+                    : 'No audio configured'}
+                </div>
+
+                {/* Hidden HTML5 audio element for non-browser voices */}
+                {video.audio_url && !useBrowserTTS && (
+                  <audio
+                    ref={audioRef}
+                    src={video.audio_url}
+                    onEnded={() => setIsPlaying(false)}
+                    onPause={() => setIsPlaying(false)}
+                    style={{ display: 'none' }}
+                    preload="none"
+                  />
                 )}
 
                 {/* Status badge */}

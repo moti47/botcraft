@@ -21,6 +21,7 @@ import { NewAvatarModal } from './components/NewAvatarModal'
 import { AvatarCommandInput } from './components/AvatarCommandInput'
 import { AvatarDetailModal } from './components/AvatarDetailModal'
 import { LanguagePicker } from './components/LanguagePicker'
+import { VideoPreviewModal } from './components/VideoPreviewModal'
 
 const BotCraftPage = () => {
   const [lang, setLang] = useState(() => localStorage.getItem('botcraft-lang') || 'EN')
@@ -1075,7 +1076,7 @@ function getStageProgress(video, nowMs) {
   }
 }
 
-function VideoProgressRow({ video, tickMs }) {
+function VideoProgressRow({ video, tickMs, onOpen }) {
   const p = getStageProgress(video, tickMs)
   const isActive = !p.terminal
   const barColor = p.terminal === 'failed'
@@ -1085,13 +1086,20 @@ function VideoProgressRow({ video, tickMs }) {
     : 'var(--brand-gradient)'
 
   return (
-    <div style={{
-      padding: '14px 16px',
-      borderBottom: '1px solid var(--border)',
-      display: 'grid',
-      gridTemplateColumns: '60px 1fr auto',
-      gap: 14, alignItems: 'center',
-    }}>
+    <div
+      onClick={() => onOpen?.(video.id)}
+      style={{
+        padding: '14px 16px',
+        borderBottom: '1px solid var(--border)',
+        display: 'grid',
+        gridTemplateColumns: '60px 1fr auto',
+        gap: 14, alignItems: 'center',
+        cursor: 'pointer',
+        transition: 'background 150ms',
+      }}
+      onMouseEnter={(e) => e.currentTarget.style.background = 'var(--surface-2)'}
+      onMouseLeave={(e) => e.currentTarget.style.background = 'transparent'}
+    >
       {/* Thumbnail */}
       <div style={{
         width: 60, height: 80,
@@ -1191,6 +1199,8 @@ const VideosPage = ({ videos, strings }) => {
   // refetching the DB. The DB poll happens on the parent's TanStack Query
   // refetch interval (we add one below if there are any active videos).
   const [tickMs, setTickMs] = React.useState(() => Date.now())
+  // The video the user clicked → opens VideoPreviewModal to actually watch it.
+  const [openVideoId, setOpenVideoId] = React.useState(null)
   const queryClient = useQueryClient()
   const hasActive = videos.some(
     (v) => v.status === 'queued' || v.status === 'processing'
@@ -1243,10 +1253,17 @@ const VideosPage = ({ videos, strings }) => {
           overflow: 'hidden',
         }}>
           {videos.map((v) => (
-            <VideoProgressRow key={v.id} video={v} tickMs={tickMs} />
+            <VideoProgressRow key={v.id} video={v} tickMs={tickMs} onOpen={setOpenVideoId} />
           ))}
         </div>
       )}
+
+      {/* Click a row → opens the watchable preview */}
+      <VideoPreviewModal
+        videoId={openVideoId}
+        isOpen={!!openVideoId}
+        onClose={() => setOpenVideoId(null)}
+      />
     </div>
   )
 }
