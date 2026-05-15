@@ -31,6 +31,7 @@ const BotCraftPage = () => {
   const [newAvatarNiche, setNewAvatarNiche] = useState('')
   const [videoTopic, setVideoTopic] = useState('')
   const [videoScheduledFor, setVideoScheduledFor] = useState('')  // empty = produce now
+  const [videoLength, setVideoLength] = useState('medium')         // short=35s | medium=60s | long=95s
   const [showNewAvatarModal, setShowNewAvatarModal] = useState(false)
   const [selectedAvatarId, setSelectedAvatarId] = useState(null)
 
@@ -112,6 +113,7 @@ const BotCraftPage = () => {
         avatar_id: avatarId,
         topic: videoTopic || null,
         scheduled_for,
+        length: videoLength,
       })
       setVideoTopic('')
       setVideoScheduledFor('')
@@ -544,6 +546,8 @@ const BotCraftPage = () => {
               strings={strings}
               onCreateAvatar={handleCreateAvatar}
               onProduceVideo={handleProduceVideo}
+              videoLength={videoLength}
+              onVideoLengthChange={setVideoLength}
               onSelectAvatar={setSelectedAvatarId}
               newAvatarNiche={newAvatarNiche}
               setNewAvatarNiche={setNewAvatarNiche}
@@ -811,6 +815,8 @@ const AvatarsPage = ({
   setVideoTopic,
   videoScheduledFor,
   setVideoScheduledFor,
+  videoLength,
+  onVideoLengthChange,
   isLoading,
 }) => {
   return (
@@ -994,6 +1000,34 @@ const AvatarsPage = ({
                   color: 'var(--text)',
                 }}
               />
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 4 }}>
+                {[
+                  { v: 'short',  label: '⚡ Short',  sub: '35s' },
+                  { v: 'medium', label: '🎬 Medium', sub: '60s' },
+                  { v: 'long',   label: '🎞️ Long',   sub: '95s' },
+                ].map((opt) => (
+                  <button
+                    key={opt.v}
+                    type="button"
+                    onClick={() => onVideoLengthChange(opt.v)}
+                    style={{
+                      padding: '6px 4px',
+                      fontSize: 10,
+                      fontWeight: 600,
+                      lineHeight: 1.25,
+                      background: videoLength === opt.v ? 'var(--brand-gradient)' : 'var(--surface-2)',
+                      color: videoLength === opt.v ? '#fff' : 'var(--text-muted)',
+                      border: `1px solid ${videoLength === opt.v ? 'transparent' : 'var(--border)'}`,
+                      borderRadius: 'var(--radius-sm)',
+                      cursor: 'pointer',
+                    }}
+                    title={`Target length: ${opt.sub}`}
+                  >
+                    <div>{opt.label}</div>
+                    <div style={{ fontSize: 8, opacity: 0.85, fontWeight: 500 }}>{opt.sub}</div>
+                  </button>
+                ))}
+              </div>
               <button
                 disabled={isLoading}
                 onClick={() => onProduceVideo(a.id)}

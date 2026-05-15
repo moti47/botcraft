@@ -20,20 +20,20 @@ import { sfx } from '../lib/sfx'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:54321/functions/v1'
 
-// Director's animation cue → CSS animation name we drive in the player.
-// Falls back to a tasteful default if the Director picks something we
-// haven't styled yet.
+// Director's animation cue → CSS animation. ALL effects are now subtle:
+// a 380ms crossfade with a tiny scale settle. No skew, no blur, no
+// rotation — the visuals don't fight the captions for attention.
 const SCENE_ANIMATIONS = {
-  zoom_punch_in:     'sceneZoomPunch',
-  freeze_frame_pop:  'sceneFreezePop',
-  whip_pan:          'sceneWhipPan',
-  text_explode:      'sceneZoomPunch',
-  slow_dolly_in:     'sceneDollyIn',
-  slow_pan_right:    'scenePanRight',
-  slow_pan_left:     'scenePanLeft',
-  hard_cut_montage:  'sceneHardCut',
-  logo_pop:          'sceneFreezePop',
-  default:           'sceneDollyIn',
+  zoom_punch_in:     'sceneFadeZoom',
+  freeze_frame_pop:  'sceneFade',
+  whip_pan:          'sceneFadeSlide',
+  text_explode:      'sceneFadeZoom',
+  slow_dolly_in:     'sceneFadeZoom',
+  slow_pan_right:    'sceneFadeSlide',
+  slow_pan_left:     'sceneFadeSlide',
+  hard_cut_montage:  'sceneFade',
+  logo_pop:          'sceneFade',
+  default:           'sceneFade',
 }
 
 // Caption styles — Director can pick one per video; we apply the matching class.
@@ -75,66 +75,109 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
   })
 
   // ════════════════════════════════════════════════════════════
-  // Multi-scene player: walks through directors_plan.sections, cutting
-  // between the avatar's portrait and b-roll Pexels clips, while
-  // SpeechSynthesis reads the line for each section. Kinetic captions
-  // highlight the current word as TTS speaks.
+  // Timeline-driven player. Each scene has a fixed (start_sec, duration_sec).
+  // A 30Hz RAF loop advances a `playheadSec` state. EVERY visual decision
+  // (which scene shows, which b-roll clip plays, where the playhead sits on
+  // the scrubber) is computed from playheadSec on every frame — so the user
+  // can drag the scrubber and the picture follows instantly, CapCut-style.
+  // TTS for each scene is fired exactly when the playhead crosses its start.
   // ════════════════════════════════════════════════════════════
+  const CUT_INTERVAL_SEC = 1.2  // visual cuts within a scene
+  const WORDS_PER_SECOND = 2.7  // pacing estimate for fallback timing
+
   const [isPlaying, setIsPlaying] = useState(false)
-  const [sceneIndex, setSceneIndex] = useState(0)
-  const [currentWord, setCurrentWord] = useState(0)         // highlighted word index within scene text
-  const [brollByQuery, setBrollByQuery] = useState({})       // cache: query → [{url}]
+  const [playheadSec, setPlayheadSec] = useState(0)
+  const [brollByQuery, setBrollByQuery] = useState({})
+  // Per-scene edits the user has made via drag: { [sceneId]: { start_sec?, duration_sec? } }
+  const [edits, setEdits] = useState({})
   const audioRef = useRef(null)
-  const stopRequested = useRef(false)
+  const playStartRef = useRef(0)           // wall-clock ms when play began
+  const playStartPlayhead = useRef(0)      // playheadSec when play began
+  const spokenScenes = useRef(new Set())   // scene ids that already triggered TTS
 
   const voiceId = video?.avatars?.voice_id || ''
   const useBrowserTTS = voiceId.startsWith('browser:')
   const browserVoiceName = useBrowserTTS ? voiceId.slice('browser:'.length) : null
 
-  // Build the scene list from directors_plan (hook + sections + cta). If no
-  // plan, fall back to splitting the raw script into ~3 chunks.
+  // Build the scene list from directors_plan. Each scene gets a stable id,
+  // an estimated duration (from Director's duration_sec or word count), and
+  // a START offset that's the running sum of the previous durations + any
+  // user edit. Returns scenes with absolute start_sec/end_sec.
   const scenes = React.useMemo(() => {
     if (!video) return []
     const plan = video.directors_plan || {}
-    const out = []
+    const raw = []
     if (plan.hook?.text) {
-      out.push({
-        kind: 'avatar',                  // hook = show the avatar (consistent face)
+      raw.push({
+        id: 'hook',
+        kind: 'avatar',
         text: plan.hook.text,
         broll_query: null,
         emphasis: [],
+        overlay: null,
+        animation: plan.hook.animation,
+        base_duration: Number(plan.hook.duration_sec) || 4,
       })
     }
-    for (const s of (plan.sections || [])) {
-      out.push({
-        kind: 'broll',                   // body = b-roll cuts
+    ;(plan.sections || []).forEach((s, i) => {
+      const wc = String(s.text || '').trim().split(/\s+/).length || 1
+      const base = Number(s.duration_sec) || Math.max(4, wc / WORDS_PER_SECOND + 0.5)
+      raw.push({
+        id: `s${i}`,
+        kind: 'broll',
         text: s.text || '',
         broll_query: s.b_roll?.query || s.b_roll_query || null,
         emphasis: s.emphasis_words || [],
-        overlay: (s.overlay_graphics || []).join(' · '),
+        overlay: (s.overlay_graphics || []).join(' · ') || null,
+        animation: s.animation,
+        base_duration: base,
       })
-    }
+    })
     if (plan.cta?.text) {
-      out.push({
-        kind: 'avatar',                  // CTA = avatar back on screen
+      raw.push({
+        id: 'cta',
+        kind: 'avatar',
         text: plan.cta.text,
         broll_query: null,
         emphasis: [],
+        overlay: null,
+        animation: plan.cta.animation,
+        base_duration: Number(plan.cta.duration_sec) || 4,
       })
     }
-    if (out.length === 0 && video.script) {
-      // No director plan — split script into ~3 chunks
+    // Fallback: split script into 3 chunks if no plan
+    if (raw.length === 0 && video.script) {
       const chunks = video.script.match(/[^.!?]+[.!?]+/g) || [video.script]
       const groupSize = Math.ceil(chunks.length / 3)
       for (let i = 0; i < chunks.length; i += groupSize) {
         const text = chunks.slice(i, i + groupSize).join(' ').trim()
-        out.push({ kind: i === 0 ? 'avatar' : 'broll', text, broll_query: video.topic, emphasis: [] })
+        const wc = text.trim().split(/\s+/).length || 1
+        raw.push({
+          id: `f${i}`,
+          kind: i === 0 ? 'avatar' : 'broll',
+          text, broll_query: video.topic, emphasis: [],
+          overlay: null, base_duration: wc / WORDS_PER_SECOND + 0.5,
+        })
       }
     }
-    return out
-  }, [video])
+
+    // Apply user edits + compute absolute start/end
+    let cursor = 0
+    return raw.map((s) => {
+      const e = edits[s.id] || {}
+      const duration_sec = Math.max(1.2, e.duration_sec ?? s.base_duration)
+      const start_sec = e.start_sec ?? cursor
+      const end_sec = start_sec + duration_sec
+      cursor = end_sec
+      return { ...s, start_sec, duration_sec, end_sec }
+    })
+  }, [video, edits])
+
+  const totalDuration = scenes.length ? scenes[scenes.length - 1].end_sec : 0
 
   // Pre-fetch b-roll clips for all scenes that need them. Cached by query.
+  // We fetch MANY clips per query (5 each) so the player can cut rapidly
+  // between them without running out.
   const ensureBroll = useCallback(async (query) => {
     if (!query) return null
     if (brollByQuery[query]) return brollByQuery[query]
@@ -142,7 +185,7 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
       const res = await fetch(`${API_URL}/fetch-broll`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, count: 2, orientation: 'portrait' }),
+        body: JSON.stringify({ query, count: 5, orientation: 'portrait' }),
       })
       const data = await res.json()
       const clips = data.clips || []
@@ -154,139 +197,144 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
     }
   }, [brollByQuery])
 
+  // For extra visual variety, also pre-fetch clips for related terms drawn
+  // from the section's emphasis words. The player can borrow these clips
+  // mid-scene to keep things moving even when one query gets exhausted.
+  const ensureBrollExtras = useCallback(async (scene) => {
+    const extras = (scene.emphasis || []).slice(0, 2)
+    for (const w of extras) {
+      if (!brollByQuery[w]) {
+        try {
+          const res = await fetch(`${API_URL}/fetch-broll`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: w, count: 3, orientation: 'portrait' }),
+          })
+          const data = await res.json()
+          setBrollByQuery((m) => ({ ...m, [w]: data.clips || [] }))
+        } catch {/* ignore */}
+      }
+    }
+  }, [brollByQuery])
+
   // Stop everything when the modal closes
   useEffect(() => {
     if (!isOpen) {
-      stopRequested.current = true
       try { window.speechSynthesis?.cancel() } catch {/* ignore */}
       if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
       setIsPlaying(false)
-      setSceneIndex(0)
-      setCurrentWord(0)
+      setPlayheadSec(0)
+      spokenScenes.current.clear()
     }
   }, [isOpen])
 
-  // Track which b-roll clip within the section is currently shown. Long
-  // sections cycle through multiple Pexels clips at ~3.5s each so the
-  // viewer doesn't see the same loop the whole time.
-  const [clipCycle, setClipCycle] = useState(0)
-
-  // Cycle b-roll clips every ~3.5s while a multi-clip scene is on screen.
-  // Inlined the scene lookup so this can sit before `scene` is declared below.
+  // RAF loop: advance playhead during playback, stop at totalDuration
   useEffect(() => {
     if (!isPlaying) return
-    const s = scenes[sceneIndex]
-    if (!s || s.kind !== 'broll') return
-    const clips = s.broll_query ? brollByQuery[s.broll_query] : null
-    if (!clips || clips.length < 2) return
-    setClipCycle(0)
-    const id = setInterval(() => setClipCycle((c) => (c + 1) % clips.length), 3500)
-    return () => clearInterval(id)
-  }, [isPlaying, sceneIndex, scenes, brollByQuery])
-
-  // Speak one scene's text. Returns a promise that resolves when done.
-  const speakScene = useCallback((text) => {
-    return new Promise((resolve) => {
-      if (!text) return resolve()
-      if (useBrowserTTS && 'speechSynthesis' in window) {
-        const utter = new SpeechSynthesisUtterance(text)
-        const voices = window.speechSynthesis.getVoices()
-        const match = voices.find((v) => v.name === browserVoiceName)
-                || voices.find((v) => v.name.toLowerCase().includes((browserVoiceName || '').toLowerCase()))
-                || voices.find((v) => v.lang?.startsWith((video?.render_options?.language || 'en').toLowerCase().slice(0, 2)))
-                || null
-        if (match) utter.voice = match
-        utter.rate = 1.0
-        // Word-by-word highlighting via the boundary event
-        utter.onboundary = (ev) => {
-          if (ev.name === 'word') {
-            // Character index → word index
-            const upto = text.slice(0, ev.charIndex).trim().split(/\s+/).length
-            setCurrentWord(upto)
-          }
-        }
-        utter.onend = () => resolve()
-        utter.onerror = () => resolve()
-        window.speechSynthesis.cancel()
-        window.speechSynthesis.speak(utter)
-      } else if (video?.audio_url && audioRef.current) {
-        // External audio: just wait for its 'ended' event (one big audio file
-        // for the whole video). Per-scene cuts still happen visually based on
-        // an even time split.
-        const dur = audioRef.current.duration || 0
-        const sceneDur = scenes.length ? dur / scenes.length : 5
-        const wordCount = (text || '').trim().split(/\s+/).length || 1
-        const interval = (sceneDur * 1000) / wordCount
-        let wi = 0
-        const id = setInterval(() => {
-          wi += 1
-          setCurrentWord(wi)
-          if (wi >= wordCount) clearInterval(id)
-        }, interval)
-        if (sceneIndex === 0) audioRef.current.play().catch(() => resolve())
-        setTimeout(() => { clearInterval(id); resolve() }, sceneDur * 1000)
-      } else {
-        // No TTS available — fallback: estimate 2.7 words/sec
-        const wordCount = (text || '').trim().split(/\s+/).length || 1
-        const ms = (wordCount / 2.7) * 1000
-        let wi = 0
-        const id = setInterval(() => {
-          wi += 1
-          setCurrentWord(wi)
-          if (wi >= wordCount) clearInterval(id)
-        }, ms / wordCount)
-        setTimeout(() => { clearInterval(id); resolve() }, ms)
+    let rafId
+    const tick = () => {
+      const elapsed = (performance.now() - playStartRef.current) / 1000
+      const ph = playStartPlayhead.current + elapsed
+      if (ph >= totalDuration) {
+        setPlayheadSec(totalDuration)
+        setIsPlaying(false)
+        try { window.speechSynthesis?.cancel() } catch {/* */}
+        return
       }
-    })
-  }, [useBrowserTTS, browserVoiceName, video, scenes.length, sceneIndex])
+      setPlayheadSec(ph)
+      rafId = requestAnimationFrame(tick)
+    }
+    rafId = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(rafId)
+  }, [isPlaying, totalDuration])
+
+  // === Derived state from playhead — recomputed every frame ===
+  const currentSceneIdx = scenes.findIndex((s) => playheadSec >= s.start_sec && playheadSec < s.end_sec)
+  const scene = scenes[currentSceneIdx >= 0 ? currentSceneIdx : 0] || null
+  const sceneIndex = currentSceneIdx >= 0 ? currentSceneIdx : 0
+  const sceneTime = scene ? (playheadSec - scene.start_sec) : 0
+  const sceneBrollClips = scene?.broll_query ? (brollByQuery[scene.broll_query] || []) : []
+  // Visual cut every CUT_INTERVAL_SEC within a scene → which clip is on screen
+  const clipCycle = sceneBrollClips.length
+    ? Math.floor(sceneTime / CUT_INTERVAL_SEC) % sceneBrollClips.length
+    : 0
+  const sceneBrollClip = sceneBrollClips[clipCycle] || null
+  // Word highlighting estimated from sceneTime (no need for TTS boundary events)
+  const sceneWordCount = scene ? (scene.text || '').trim().split(/\s+/).length : 0
+  const currentWord = scene
+    ? Math.min(sceneWordCount, Math.floor((sceneTime / scene.duration_sec) * sceneWordCount))
+    : 0
+
+  // Whenever playhead crosses into a new scene, speak its text. We use a
+  // ref-set to ensure we only fire TTS once per scene per play-through.
+  useEffect(() => {
+    if (!isPlaying || !scene) return
+    if (spokenScenes.current.has(scene.id)) return
+    spokenScenes.current.add(scene.id)
+    // SFX on scene boundary
+    if (sceneIndex === 0) sfx.thump()
+    else if (scene.kind === 'avatar') sfx.ding()
+    else sfx.whoosh()
+    // Speak the text
+    const text = scene.text || ''
+    if (useBrowserTTS && 'speechSynthesis' in window && text) {
+      const utter = new SpeechSynthesisUtterance(text)
+      const voices = window.speechSynthesis.getVoices()
+      const match = voices.find((v) => v.name === browserVoiceName)
+              || voices.find((v) => v.name.toLowerCase().includes((browserVoiceName || '').toLowerCase()))
+              || voices.find((v) => v.lang?.startsWith((video?.render_options?.language || 'en').toLowerCase().slice(0, 2)))
+              || null
+      if (match) utter.voice = match
+      // Match TTS rate to scene duration so words finish around the visual end
+      const naturalDur = (text.trim().split(/\s+/).length || 1) / WORDS_PER_SECOND
+      utter.rate = Math.max(0.6, Math.min(1.6, naturalDur / scene.duration_sec))
+      window.speechSynthesis.cancel()
+      window.speechSynthesis.speak(utter)
+    }
+  }, [scene?.id, isPlaying, useBrowserTTS, browserVoiceName, video, sceneIndex])
+
+  // SFX pop on visual cut within a scene
+  const prevClipCycle = useRef(0)
+  useEffect(() => {
+    if (!isPlaying) return
+    if (clipCycle !== prevClipCycle.current) {
+      sfx.tick()
+      prevClipCycle.current = clipCycle
+    }
+  }, [clipCycle, isPlaying])
+
+  const seekTo = useCallback((sec) => {
+    const clamped = Math.max(0, Math.min(totalDuration, sec))
+    setPlayheadSec(clamped)
+    playStartRef.current = performance.now()
+    playStartPlayhead.current = clamped
+    // Reset speech state — scenes "before" us are considered already spoken;
+    // the current scene will re-trigger via the scene useEffect
+    try { window.speechSynthesis?.cancel() } catch {/* */}
+    spokenScenes.current = new Set(
+      scenes.filter((s) => s.end_sec <= clamped).map((s) => s.id),
+    )
+  }, [scenes, totalDuration])
 
   const playVideo = useCallback(async () => {
     if (isPlaying) {
-      stopRequested.current = true
       try { window.speechSynthesis?.cancel() } catch {/* */}
-      if (audioRef.current) audioRef.current.pause()
       setIsPlaying(false)
       return
     }
     if (scenes.length === 0) return
-
-    // Warm up the speech synth voice list (Chrome quirk)
     try { window.speechSynthesis?.getVoices() } catch {/* */}
-
-    // Pre-fetch b-roll for all scenes that need it
+    // Pre-fetch ALL b-roll in parallel so cuts can happen instantly
     await Promise.all(scenes.filter((s) => s.broll_query).map((s) => ensureBroll(s.broll_query)))
-
-    stopRequested.current = false
+    // If we're at the end, restart from 0
+    const startAt = playheadSec >= totalDuration ? 0 : playheadSec
+    playStartRef.current = performance.now()
+    playStartPlayhead.current = startAt
+    spokenScenes.current = new Set(
+      scenes.filter((s) => s.end_sec <= startAt).map((s) => s.id),
+    )
+    setPlayheadSec(startAt)
     setIsPlaying(true)
-    for (let i = 0; i < scenes.length; i++) {
-      if (stopRequested.current) break
-      setSceneIndex(i)
-      setCurrentWord(0)
-      await speakScene(scenes[i].text)
-    }
-    setIsPlaying(false)
-    setSceneIndex(0)
-    setCurrentWord(0)
-  }, [isPlaying, scenes, ensureBroll, speakScene])
-
-  // The currently-on-screen scene
-  const scene = scenes[sceneIndex] || null
-  const sceneBrollClips = scene?.broll_query ? (brollByQuery[scene.broll_query] || []) : []
-  const sceneBrollClip = sceneBrollClips[clipCycle % Math.max(1, sceneBrollClips.length)] || null
-
-  // Trigger SFX on scene change + word boundaries
-  useEffect(() => {
-    if (!isPlaying || !scene) return
-    if (sceneIndex === 0) sfx.thump()        // hook punch-in
-    else if (scene.kind === 'avatar') sfx.ding()  // CTA arrival
-    else sfx.whoosh()                         // body scene swap
-  }, [sceneIndex, isPlaying])
-
-  // Pop on each highlighted word — gives the captions rhythm
-  useEffect(() => {
-    if (!isPlaying || currentWord === 0) return
-    sfx.pop()
-  }, [currentWord, isPlaying])
+  }, [isPlaying, scenes, ensureBroll, playheadSec, totalDuration])
 
   // Director's chosen styles for this video
   const sceneAnimation = SCENE_ANIMATIONS[
@@ -450,94 +498,50 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
               {/* === Left: Player (avatar shots intercut with b-roll, viral captions) === */}
               <div>
                 <style>{`
+                  /* Subtle Ken Burns: very slow, very small movement so the
+                     subject behind the captions never moves enough to distract. */
                   @keyframes kenBurnsZoom {
-                    0%   { transform: scale(1.0)   translate(0,    0); }
-                    50%  { transform: scale(1.06)  translate(-1%, -1%); }
-                    100% { transform: scale(1.10)  translate(1%,   1%); }
+                    0%   { transform: scale(1.0); }
+                    100% { transform: scale(1.04); }
                   }
-                  @keyframes sceneZoomPunch {
-                    0%   { transform: scale(1.25); opacity: 0; }
-                    60%  { transform: scale(0.98); opacity: 1; }
-                    100% { transform: scale(1.00); }
+                  /* All scene-entry animations are now a clean 380ms crossfade.
+                     Different "moves" just nudge the start slightly. */
+                  @keyframes sceneFade {
+                    0%   { opacity: 0; }
+                    100% { opacity: 1; }
                   }
-                  @keyframes sceneFreezePop {
-                    0%   { transform: scale(0.85) rotate(-2deg); opacity: 0; }
-                    100% { transform: scale(1.00) rotate(0);     opacity: 1; }
+                  @keyframes sceneFadeZoom {
+                    0%   { opacity: 0; transform: scale(1.04); }
+                    100% { opacity: 1; transform: scale(1.00); }
                   }
-                  @keyframes sceneWhipPan {
-                    0%   { transform: translateX(50%) skewX(-15deg); opacity: 0; filter: blur(8px); }
-                    60%  { transform: translateX(-3%) skewX(2deg);   opacity: 1; filter: blur(0); }
-                    100% { transform: translateX(0)   skewX(0);      opacity: 1; }
+                  @keyframes sceneFadeSlide {
+                    0%   { opacity: 0; transform: translateX(2%); }
+                    100% { opacity: 1; transform: translateX(0); }
                   }
-                  @keyframes sceneDollyIn {
-                    0%   { transform: scale(1.15); opacity: 0; }
-                    100% { transform: scale(1.00); opacity: 1; }
-                  }
-                  @keyframes scenePanRight {
-                    0%   { transform: translateX(-6%) scale(1.08); opacity: 0; }
-                    100% { transform: translateX(0)   scale(1.08); opacity: 1; }
-                  }
-                  @keyframes scenePanLeft {
-                    0%   { transform: translateX(6%)  scale(1.08); opacity: 0; }
-                    100% { transform: translateX(0)   scale(1.08); opacity: 1; }
-                  }
-                  @keyframes sceneHardCut {
-                    0%   { filter: brightness(2.2); }
-                    20%  { filter: brightness(1.0); }
-                    100% { filter: brightness(1.0); }
-                  }
+                  /* Captions: gentle drop-in, no scale overshoot. */
                   @keyframes captionDrop {
-                    0%   { transform: translateY(20px) scale(0.9); opacity: 0; }
-                    60%  { transform: translateY(-3px) scale(1.04); }
-                    100% { transform: translateY(0)    scale(1.0); opacity: 1; }
-                  }
-                  @keyframes wordPop {
-                    0%   { transform: scale(0.7);  }
-                    60%  { transform: scale(1.18); }
-                    100% { transform: scale(1.00); }
+                    0%   { opacity: 0; transform: translateY(8px); }
+                    100% { opacity: 1; transform: translateY(0); }
                   }
                   @keyframes overlaySlide {
-                    0%   { transform: translateY(60px) rotate(-3deg); opacity: 0; }
-                    100% { transform: translateY(0)    rotate(-3deg); opacity: 1; }
+                    0%   { opacity: 0; transform: translateY(10px); }
+                    100% { opacity: 1; transform: translateY(0); }
                   }
-                  @keyframes hookBadgeWiggle {
-                    0%, 100% { transform: rotate(-2deg) scale(1.0); }
-                    50%      { transform: rotate(-4deg) scale(1.05); }
-                  }
-                  /* Caption text styling — kinetic by default */
+                  /* Active word: subtle highlight only, no bounce */
                   .vp-cap-word {
                     display: inline-block;
                     margin: 0 3px;
-                    transition: transform 120ms ease-out;
+                    transition: color 140ms, background-color 140ms;
                   }
                   .cap-yellow .vp-cap-word.active {
                     background: #FBBF24; color: #000;
                     padding: 2px 6px; border-radius: 5px;
-                    box-shadow: 0 0 14px rgba(251,191,36,0.7), 0 2px 4px rgba(0,0,0,0.5);
-                    animation: wordPop 220ms cubic-bezier(0.22,1,0.36,1);
                   }
-                  .cap-bouncy .vp-cap-word.active {
-                    color: #FBBF24;
-                    text-shadow: 3px 3px 0 #000, 0 0 20px rgba(251,191,36,0.8);
-                    animation: wordPop 260ms cubic-bezier(0.34,1.56,0.64,1);
-                    transform: scale(1.15);
-                  }
-                  .cap-bold-outline .vp-cap-word.active {
-                    color: #fff;
-                    -webkit-text-stroke: 2px #FBBF24;
-                    text-shadow: 0 0 18px #FBBF24;
-                    transform: scale(1.1);
-                  }
+                  .cap-bouncy .vp-cap-word.active,
+                  .cap-bold-outline .vp-cap-word.active,
                   .cap-gradient .vp-cap-word.active {
-                    background: linear-gradient(135deg, #FBBF24, #EF4444);
-                    -webkit-background-clip: text;
-                    background-clip: text;
-                    color: transparent;
-                    transform: scale(1.2);
-                    text-shadow: none;
-                    filter: drop-shadow(0 0 12px rgba(251,191,36,0.7));
+                    color: #FBBF24;
                   }
-                  /* Animated b-roll/avatar pan */
                   .vp-scene-layer {
                     position: absolute; inset: 0;
                     background-size: cover; background-position: center;
@@ -564,7 +568,7 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                       className="vp-scene-layer"
                       style={{
                         backgroundImage: `url(${proxyImage(video.avatars.image_url)})`,
-                        animation: `${sceneAnimation} 700ms cubic-bezier(0.22,1,0.36,1), kenBurnsZoom 8s 700ms ease-in-out infinite alternate`,
+                        animation: `${sceneAnimation} 380ms ease-out, kenBurnsZoom 14s ease-in-out infinite alternate`,
                       }}
                     />
                   )}
@@ -579,7 +583,7 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                         position: 'absolute', inset: 0,
                         width: '100%', height: '100%',
                         objectFit: 'cover',
-                        animation: `${sceneAnimation} 700ms cubic-bezier(0.22,1,0.36,1)`,
+                        animation: `${sceneAnimation} 380ms ease-out`,
                       }}
                     />
                   )}
@@ -589,7 +593,7 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                       className="vp-scene-layer"
                       style={{
                         backgroundImage: `url(${proxyImage(video.avatars.image_url)})`,
-                        animation: `${sceneAnimation} 700ms cubic-bezier(0.22,1,0.36,1), kenBurnsZoom 8s 700ms ease-in-out infinite alternate`,
+                        animation: `${sceneAnimation} 380ms ease-out, kenBurnsZoom 14s ease-in-out infinite alternate`,
                         filter: 'brightness(0.85)',
                       }}
                     />
@@ -678,7 +682,7 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                         letterSpacing: 1.2, textTransform: 'uppercase',
                         boxShadow: '0 6px 18px rgba(0,0,0,0.55)',
                         borderRadius: 5,
-                        animation: 'hookBadgeWiggle 2.4s ease-in-out infinite',
+                        animation: 'sceneFade 380ms ease-out',
                       }}>
                         🎬 {video.directors_plan?.title || video.topic}
                       </div>
@@ -731,26 +735,66 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                   )}
                 </div>
 
-                {/* Play / Stop button + voice label */}
-                <button
-                  onClick={playVideo}
-                  disabled={!video.script}
-                  style={{
-                    width: '100%',
-                    padding: '12px',
-                    background: isPlaying ? 'var(--danger-bg)' : 'var(--brand-gradient)',
-                    color: isPlaying ? 'var(--danger)' : '#fff',
-                    border: 'none',
+                {/* Play / Stop button + time readout */}
+                <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                  <button
+                    onClick={playVideo}
+                    disabled={!video.script}
+                    style={{
+                      flex: 1,
+                      padding: '12px',
+                      background: isPlaying ? 'var(--danger-bg)' : 'var(--brand-gradient)',
+                      color: isPlaying ? 'var(--danger)' : '#fff',
+                      border: 'none',
+                      borderRadius: 'var(--radius-md)',
+                      fontSize: 13,
+                      fontWeight: 700,
+                      cursor: video.script ? 'pointer' : 'not-allowed',
+                      opacity: video.script ? 1 : 0.5,
+                      boxShadow: isPlaying ? 'none' : 'var(--shadow-glow)',
+                    }}
+                  >
+                    {isPlaying ? '⏸ Pause' : '▶ Play'}
+                  </button>
+                  <div style={{
+                    padding: '8px 10px',
+                    fontFamily: 'var(--font-mono, monospace)',
+                    fontSize: 12, fontWeight: 700,
+                    background: 'var(--surface-2)', color: 'var(--text)',
+                    border: '1px solid var(--border)',
                     borderRadius: 'var(--radius-md)',
-                    fontSize: 13,
-                    fontWeight: 700,
-                    cursor: video.script ? 'pointer' : 'not-allowed',
-                    opacity: video.script ? 1 : 0.5,
-                    boxShadow: isPlaying ? 'none' : 'var(--shadow-glow)',
-                  }}
-                >
-                  {isPlaying ? '⏸ Stop' : '▶ Play video'}
-                </button>
+                    minWidth: 72, textAlign: 'center',
+                  }}>
+                    {playheadSec.toFixed(1)}s / {totalDuration.toFixed(1)}s
+                  </div>
+                </div>
+
+                {/* === TIMELINE / SCRUBBER === */}
+                {scenes.length > 0 && (
+                  <Timeline
+                    scenes={scenes}
+                    playheadSec={playheadSec}
+                    totalDuration={totalDuration}
+                    onSeek={seekTo}
+                    onEditScene={(id, patch) => setEdits((m) => ({ ...m, [id]: { ...(m[id] || {}), ...patch } }))}
+                    onSave={async () => {
+                      // Persist scene edits to directors_plan.sections + hook/cta durations
+                      const plan = { ...(video.directors_plan || {}) }
+                      const newSections = (plan.sections || []).map((s, i) => {
+                        const sceneId = `s${i}`
+                        const e = edits[sceneId]; if (!e) return s
+                        return { ...s, duration_sec: e.duration_sec ?? s.duration_sec }
+                      })
+                      if (edits.hook?.duration_sec && plan.hook) plan.hook.duration_sec = edits.hook.duration_sec
+                      if (edits.cta?.duration_sec && plan.cta)   plan.cta.duration_sec  = edits.cta.duration_sec
+                      plan.sections = newSections
+                      await supabase.from('videos').update({ directors_plan: plan, updated_at: new Date().toISOString() }).eq('id', videoId)
+                      setEdits({})
+                      refetch()
+                    }}
+                    dirty={Object.keys(edits).length > 0}
+                  />
+                )}
                 <div style={{ fontSize: 10, color: 'var(--text-dim)', textAlign: 'center', marginTop: 4 }}>
                   {useBrowserTTS
                     ? `Voice: ${browserVoiceName} (browser)`
@@ -1302,6 +1346,230 @@ function ScenesEditor({ video, scenes, onSave, onSwapBroll }) {
             </div>
           </div>
         ))}
+      </div>
+    </div>
+  )
+}
+
+// ════════════════════════════════════════════════════════════
+// Timeline — CapCut-style scrubbable timeline with draggable scene blocks.
+//
+// Three tracks stacked vertically:
+//   🎥 Visual — one block per scene, color-coded by kind (avatar/broll)
+//   💬 Captions — same width as scenes, dimmed pill
+//   🎵 SFX — marker dots at scene boundaries
+//
+// Interactions:
+//   - Click anywhere on the ruler → seeks playhead
+//   - Drag right edge of a visual block → resizes scene duration
+//   - "Save edits" button persists durations back to directors_plan
+//
+// Drag-to-move-the-whole-block is intentionally NOT enabled (yet) because
+// it would require recomputing every following scene's start. Resize-only
+// keeps the model simple and matches what users actually want most.
+// ════════════════════════════════════════════════════════════
+function Timeline({ scenes, playheadSec, totalDuration, onSeek, onEditScene, onSave, dirty }) {
+  const rulerRef = React.useRef(null)
+  const [dragging, setDragging] = React.useState(null) // { sceneId, startX, startDuration }
+
+  const pctOf = (sec) => totalDuration > 0 ? (sec / totalDuration) * 100 : 0
+
+  const handleRulerClick = (e) => {
+    if (dragging) return
+    const r = rulerRef.current?.getBoundingClientRect()
+    if (!r) return
+    const x = e.clientX - r.left
+    const sec = (x / r.width) * totalDuration
+    onSeek(sec)
+  }
+
+  // Resize handle: drag the right edge of a scene block to change duration
+  const handleResizeStart = (e, scene) => {
+    e.stopPropagation()
+    e.preventDefault()
+    const r = rulerRef.current?.getBoundingClientRect()
+    if (!r) return
+    setDragging({ sceneId: scene.id, startX: e.clientX, startDuration: scene.duration_sec, pxPerSec: r.width / Math.max(1, totalDuration) })
+  }
+
+  React.useEffect(() => {
+    if (!dragging) return
+    const onMove = (e) => {
+      const deltaPx = e.clientX - dragging.startX
+      const deltaSec = deltaPx / dragging.pxPerSec
+      const newDuration = Math.max(1.2, dragging.startDuration + deltaSec)
+      onEditScene(dragging.sceneId, { duration_sec: newDuration })
+    }
+    const onUp = () => setDragging(null)
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+    return () => {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+  }, [dragging, onEditScene])
+
+  const TICKS = 8  // number of vertical tick marks for time reference
+
+  return (
+    <div style={{ marginTop: 12 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
+        <div style={{ fontSize: 10, fontWeight: 700, color: 'var(--text-muted)', letterSpacing: 0.5, textTransform: 'uppercase' }}>
+          🎬 Timeline — click to scrub, drag edges to resize
+        </div>
+        {dirty && (
+          <button
+            onClick={onSave}
+            style={{
+              padding: '3px 10px', fontSize: 10, fontWeight: 700,
+              background: 'var(--brand-gradient)', color: '#fff',
+              border: 'none', borderRadius: 999, cursor: 'pointer',
+            }}
+          >💾 Save edits</button>
+        )}
+      </div>
+
+      {/* Time ruler */}
+      <div
+        ref={rulerRef}
+        onClick={handleRulerClick}
+        style={{
+          position: 'relative',
+          height: 16,
+          background: 'var(--surface-2)',
+          borderRadius: 4,
+          cursor: 'pointer',
+          marginBottom: 4,
+          userSelect: 'none',
+        }}
+      >
+        {[...Array(TICKS + 1)].map((_, i) => (
+          <div key={i} style={{
+            position: 'absolute', top: 0, bottom: 0,
+            left: `${(i / TICKS) * 100}%`,
+            width: 1, background: 'var(--border)',
+          }} />
+        ))}
+        {[...Array(TICKS + 1)].map((_, i) => (
+          <div key={`l-${i}`} style={{
+            position: 'absolute', top: 2,
+            left: `${(i / TICKS) * 100}%`,
+            transform: 'translateX(-50%)',
+            fontSize: 8, color: 'var(--text-dim)', fontFamily: 'monospace',
+          }}>
+            {((i / TICKS) * totalDuration).toFixed(0)}s
+          </div>
+        ))}
+      </div>
+
+      {/* Track 1 — Visual scenes */}
+      <Track icon="🎥" label="Visual">
+        {scenes.map((s) => {
+          const left = pctOf(s.start_sec)
+          const width = pctOf(s.duration_sec)
+          return (
+            <div
+              key={s.id}
+              title={`${s.kind} · ${s.duration_sec.toFixed(1)}s\n${s.text?.slice(0, 60) || ''}`}
+              style={{
+                position: 'absolute',
+                left: `${left}%`, width: `calc(${width}% - 2px)`,
+                top: 2, bottom: 2,
+                background: s.kind === 'avatar'
+                  ? 'linear-gradient(135deg, #7C3AED, #A78BFA)'
+                  : 'linear-gradient(135deg, #06B6D4, #38BDF8)',
+                borderRadius: 3,
+                display: 'flex', alignItems: 'center',
+                padding: '0 6px',
+                fontSize: 9, fontWeight: 700, color: '#fff',
+                overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+                boxShadow: '0 1px 2px rgba(0,0,0,0.2)',
+              }}
+            >
+              {s.kind === 'avatar' ? '👤' : '🎞️'} {s.text?.slice(0, 32) || s.kind}
+              {/* Resize handle */}
+              <div
+                onMouseDown={(e) => handleResizeStart(e, s)}
+                style={{
+                  position: 'absolute', right: 0, top: 0, bottom: 0, width: 6,
+                  cursor: 'ew-resize',
+                  background: 'rgba(255,255,255,0.3)',
+                  borderRadius: '0 3px 3px 0',
+                }}
+              />
+            </div>
+          )
+        })}
+      </Track>
+
+      {/* Track 2 — Captions */}
+      <Track icon="💬" label="Captions">
+        {scenes.map((s) => (
+          <div key={s.id} style={{
+            position: 'absolute',
+            left: `${pctOf(s.start_sec)}%`,
+            width: `calc(${pctOf(s.duration_sec)}% - 2px)`,
+            top: 3, bottom: 3,
+            background: 'rgba(251, 191, 36, 0.25)',
+            border: '1px solid rgba(251, 191, 36, 0.6)',
+            borderRadius: 3,
+            fontSize: 9, color: '#FBBF24',
+            display: 'flex', alignItems: 'center', padding: '0 5px',
+            overflow: 'hidden', whiteSpace: 'nowrap', textOverflow: 'ellipsis',
+          }}>
+            {s.text?.slice(0, 24) || ''}
+          </div>
+        ))}
+      </Track>
+
+      {/* Track 3 — SFX */}
+      <Track icon="🎵" label="SFX" height={12}>
+        {scenes.map((s, i) => (
+          <div key={s.id} style={{
+            position: 'absolute', left: `${pctOf(s.start_sec)}%`,
+            top: '50%', transform: 'translate(-50%, -50%)',
+            width: 6, height: 6, borderRadius: '50%',
+            background: i === 0 ? '#EF4444' : s.kind === 'avatar' ? '#10B981' : '#06B6D4',
+            boxShadow: '0 0 3px currentColor',
+          }} title={i === 0 ? 'thump' : s.kind === 'avatar' ? 'ding' : 'whoosh'} />
+        ))}
+      </Track>
+
+      {/* Playhead line — overlay across the entire stack */}
+      <div style={{
+        position: 'relative', height: 0,
+        pointerEvents: 'none',
+      }}>
+        <div style={{
+          position: 'absolute',
+          left: `${pctOf(playheadSec)}%`,
+          top: -114, height: 114,
+          width: 2, background: '#fff',
+          boxShadow: '0 0 6px rgba(255,255,255,0.8)',
+          transform: 'translateX(-1px)',
+        }} />
+      </div>
+    </div>
+  )
+}
+
+function Track({ icon, label, children, height = 18 }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'stretch', gap: 6, marginBottom: 3 }}>
+      <div style={{
+        width: 54, fontSize: 9, fontWeight: 600, color: 'var(--text-muted)',
+        display: 'flex', alignItems: 'center', gap: 3,
+      }}>
+        <span>{icon}</span> <span>{label}</span>
+      </div>
+      <div style={{
+        flex: 1, position: 'relative',
+        height,
+        background: 'rgba(0,0,0,0.15)',
+        borderRadius: 3,
+        overflow: 'hidden',
+      }}>
+        {children}
       </div>
     </div>
   )
