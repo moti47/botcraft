@@ -215,6 +215,27 @@ export const useAvatarPreview = () => {
 }
 
 /**
+ * Hook: Improve a single piece of user-typed text via LLM.
+ * Use this when the user already has content in a field and wants it polished.
+ */
+export const useImproveField = () => {
+  return useMutation({
+    mutationFn: async ({ field, current_text, niche, tone, language, ui_language }) => {
+      const res = await fetch(`${API_URL}/improve-field`, {
+        method: 'POST',
+        headers: await getAuthHeaders(),
+        body: JSON.stringify({ field, current_text, niche, tone, language, ui_language }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || 'Improve failed')
+      }
+      return res.json()
+    },
+  })
+}
+
+/**
  * Hook: Match voices for an avatar (ElevenLabs)
  */
 export const useMatchVoices = (avatarId, enabled = true) => {
