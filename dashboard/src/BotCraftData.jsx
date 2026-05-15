@@ -110,11 +110,20 @@ export const useVideos = () => {
             id: v.id,
             title: v.topic || renderOpts.topic || 'Untitled',
             avatar: avatar?.name || 'Unknown',
+            avatar_id: v.avatar_id,
             status: v.status || 'queued',
             step: statusToStep[v.status] || 1,
-            views: '0', // TODO: query analytics table if exists
-            platforms: [], // TODO: get from published_platforms
+            views: '0',
+            platforms: [],
             thumb: 'linear-gradient(135deg, #7C3AED, #06B6D4)',
+            thumbnail_url: v.thumbnail_url || null,
+            // Live pipeline state — used by VideosPage for the progress bar
+            currently_in: v.currently_in || null,
+            stage_error: v.stage_error || null,
+            error_message: v.error_message || null,
+            stages: renderOpts.stages || {},
+            viral_score: v.viral_score ?? null,
+            created_at: v.created_at,
             created: v.created_at ? (() => {
               const d = new Date(v.created_at)
               const now = new Date()

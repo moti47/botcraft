@@ -1022,98 +1022,231 @@ const AvatarsPage = ({
 }
 
 // === VIDEOS PAGE ===
+// Pipeline stages in production order. Weight each by typical seconds the
+// stage takes — measured from real runs. These let us turn a stage name
+// into a percent-complete + ETA without instrumenting the backend further.
+const PIPELINE_STAGES = [
+  { id: 'starting',   label: 'Starting',          seconds: 1  },
+  { id: 'director',   label: '🎬 AI Director',    seconds: 6  },
+  { id: 'script',     label: '✍️ Writing script', seconds: 1  },
+  { id: 'audio',      label: '🎙️ Audio',          seconds: 3  },
+  { id: 'thumbnail',  label: '🖼️ Thumbnail',      seconds: 1  },
+  { id: 'finalizing', label: '✅ Finalizing',     seconds: 1  },
+]
+const TOTAL_PIPELINE_SECONDS = PIPELINE_STAGES.reduce((s, x) => s + x.seconds, 0)
+
+function getStageProgress(video, nowMs) {
+  // Terminal states
+  if (video.status === 'ready_for_review' || video.status === 'ready' || video.status === 'posted') {
+    return { pct: 100, label: 'Done', eta: 0, terminal: 'success' }
+  }
+  if (video.status === 'failed' || video.status === 'discarded') {
+    return {
+      pct: 100, label: video.stage_error ? `Failed at ${video.stage_error}` : 'Failed',
+      eta: 0, terminal: 'failed', errorMessage: video.error_message,
+    }
+  }
+
+  // Active pipeline — find current stage
+  const cur = video.currently_in || 'starting'
+  const idx = PIPELINE_STAGES.findIndex((s) => s.id === cur)
+  if (idx === -1) {
+    // Pipeline hasn't reported a stage yet (just queued)
+    return { pct: 5, label: 'Queued', eta: TOTAL_PIPELINE_SECONDS }
+  }
+
+  // Seconds completed by the stages that already finished
+  const completedSec = PIPELINE_STAGES.slice(0, idx).reduce((s, x) => s + x.seconds, 0)
+
+  // Within the current stage, estimate progress by elapsed wall time since
+  // the stage started (from render_options.stages[stageId] timestamp).
+  const stageStartedAt = video.stages?.[cur] ? new Date(video.stages[cur]).getTime() : nowMs
+  const elapsedInStage = Math.max(0, (nowMs - stageStartedAt) / 1000)
+  const stageDuration = PIPELINE_STAGES[idx].seconds
+  const inStageFrac = Math.min(1, elapsedInStage / stageDuration)
+
+  const pct = Math.round(((completedSec + inStageFrac * stageDuration) / TOTAL_PIPELINE_SECONDS) * 100)
+  const remainingSec = Math.max(0, TOTAL_PIPELINE_SECONDS - completedSec - inStageFrac * stageDuration)
+
+  return {
+    pct: Math.min(99, Math.max(5, pct)),
+    label: PIPELINE_STAGES[idx].label,
+    eta: Math.round(remainingSec),
+  }
+}
+
+function VideoProgressRow({ video, tickMs }) {
+  const p = getStageProgress(video, tickMs)
+  const isActive = !p.terminal
+  const barColor = p.terminal === 'failed'
+    ? 'var(--danger)'
+    : p.terminal === 'success'
+    ? 'var(--success)'
+    : 'var(--brand-gradient)'
+
+  return (
+    <div style={{
+      padding: '14px 16px',
+      borderBottom: '1px solid var(--border)',
+      display: 'grid',
+      gridTemplateColumns: '60px 1fr auto',
+      gap: 14, alignItems: 'center',
+    }}>
+      {/* Thumbnail */}
+      <div style={{
+        width: 60, height: 80,
+        borderRadius: 'var(--radius-sm)',
+        background: video.thumbnail_url ? `url(${video.thumbnail_url}) center/cover` : 'var(--brand-gradient)',
+        flexShrink: 0,
+      }} />
+
+      {/* Title + progress */}
+      <div style={{ minWidth: 0 }}>
+        <div style={{
+          fontSize: 13, fontWeight: 600, color: 'var(--text)',
+          display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4,
+        }}>
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {video.title}
+          </span>
+          <span style={{ color: 'var(--text-dim)', fontSize: 11, fontWeight: 400 }}>
+            · {video.avatar}
+          </span>
+          {video.viral_score != null && (
+            <span style={{
+              padding: '1px 6px', borderRadius: 999, fontSize: 10, fontWeight: 700,
+              background: 'rgba(124,58,237,0.12)', color: 'var(--primary)',
+            }}>
+              🔥 {video.viral_score}
+            </span>
+          )}
+        </div>
+
+        {/* Progress bar */}
+        <div style={{
+          height: 8, borderRadius: 999,
+          background: 'var(--surface-2)',
+          overflow: 'hidden', position: 'relative',
+        }}>
+          <div style={{
+            width: `${p.pct}%`, height: '100%',
+            background: barColor,
+            transition: 'width 600ms cubic-bezier(0.22,1,0.36,1)',
+            boxShadow: isActive ? '0 0 8px rgba(124,58,237,0.5)' : 'none',
+          }} />
+          {isActive && (
+            <div style={{
+              position: 'absolute', inset: 0,
+              background: 'linear-gradient(90deg, transparent, rgba(255,255,255,0.25), transparent)',
+              animation: 'progShimmer 1.6s linear infinite',
+              transform: `translateX(${-100 + p.pct}%)`,
+              width: '40%',
+            }} />
+          )}
+        </div>
+
+        {/* Status line */}
+        <div style={{
+          marginTop: 5, display: 'flex', justifyContent: 'space-between',
+          fontSize: 11, color: 'var(--text-muted)',
+        }}>
+          <span>
+            {p.label}
+            {isActive && <> · {p.pct}%</>}
+          </span>
+          <span>
+            {isActive
+              ? `~${p.eta}s left`
+              : p.terminal === 'failed'
+              ? <span style={{ color: 'var(--danger)' }}>{p.errorMessage || 'failed'}</span>
+              : video.created}
+          </span>
+        </div>
+      </div>
+
+      {/* Right: status pill */}
+      <div style={{
+        padding: '6px 10px',
+        borderRadius: 999, fontSize: 10, fontWeight: 700,
+        background: video.status === 'ready_for_review' || video.status === 'ready' || video.status === 'posted'
+          ? 'var(--success-bg)'
+          : video.status === 'failed' || video.status === 'discarded'
+          ? 'rgba(239,68,68,0.12)'
+          : 'rgba(6,182,212,0.12)',
+        color: video.status === 'ready_for_review' || video.status === 'ready' || video.status === 'posted'
+          ? 'var(--success)'
+          : video.status === 'failed' || video.status === 'discarded'
+          ? 'var(--danger)'
+          : 'var(--accent)',
+        whiteSpace: 'nowrap',
+      }}>
+        {video.status}
+      </div>
+    </div>
+  )
+}
+
 const VideosPage = ({ videos, strings }) => {
+  // Tick once per second so active progress bars advance smoothly without
+  // refetching the DB. The DB poll happens on the parent's TanStack Query
+  // refetch interval (we add one below if there are any active videos).
+  const [tickMs, setTickMs] = React.useState(() => Date.now())
+  const queryClient = useQueryClient()
+  const hasActive = videos.some(
+    (v) => v.status === 'queued' || v.status === 'processing'
+  )
+
+  React.useEffect(() => {
+    if (!hasActive) return
+    const id = setInterval(() => {
+      setTickMs(Date.now())
+      // Every 4 seconds also refetch to pick up real backend progress
+      if (Math.floor(Date.now() / 1000) % 4 === 0) {
+        queryClient.invalidateQueries({ queryKey: ['videos'] })
+      }
+    }, 1000)
+    return () => clearInterval(id)
+  }, [hasActive, queryClient])
+
   return (
     <div>
-      <h2 style={{
-        fontSize: '16px',
-        fontWeight: '600',
-        color: 'var(--text)',
-        marginBottom: '16px',
-      }}>
-        {strings?.recentVideos || 'All videos'}
-      </h2>
+      <style>{`@keyframes progShimmer {
+        0% { transform: translateX(-100%); }
+        100% { transform: translateX(250%); }
+      }`}</style>
       <div style={{
-        background: 'var(--surface)',
-        border: '1px solid var(--border)',
-        borderRadius: 'var(--radius-lg)',
-        overflow: 'hidden',
+        display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', marginBottom: 16,
       }}>
-        <table style={{
-          width: '100%',
-          borderCollapse: 'collapse',
-          fontSize: '12px',
-        }}>
-          <thead>
-            <tr style={{ borderBottom: '1px solid var(--border)' }}>
-              <th style={{
-                padding: '12px 16px',
-                textAlign: 'left',
-                fontWeight: '600',
-                color: 'var(--text-muted)',
-                background: 'var(--surface-2)',
-              }}>
-                Title
-              </th>
-              <th style={{
-                padding: '12px 16px',
-                textAlign: 'left',
-                fontWeight: '600',
-                color: 'var(--text-muted)',
-                background: 'var(--surface-2)',
-              }}>
-                Avatar
-              </th>
-              <th style={{
-                padding: '12px 16px',
-                textAlign: 'left',
-                fontWeight: '600',
-                color: 'var(--text-muted)',
-                background: 'var(--surface-2)',
-              }}>
-                Status
-              </th>
-              <th style={{
-                padding: '12px 16px',
-                textAlign: 'left',
-                fontWeight: '600',
-                color: 'var(--text-muted)',
-                background: 'var(--surface-2)',
-              }}>
-                Created
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {videos.map((v) => (
-              <tr key={v.id} style={{ borderBottom: '1px solid var(--border)' }}>
-                <td style={{ padding: '12px 16px', color: 'var(--text)' }}>
-                  {v.title}
-                </td>
-                <td style={{ padding: '12px 16px', color: 'var(--text-muted)' }}>
-                  {v.avatar}
-                </td>
-                <td style={{ padding: '12px 16px' }}>
-                  <span style={{
-                    display: 'inline-block',
-                    padding: '4px 8px',
-                    borderRadius: '4px',
-                    fontSize: '10px',
-                    fontWeight: '600',
-                    background: v.status === 'ready' ? 'var(--success-bg)' : v.status === 'processing' ? 'rgba(6,182,212,0.12)' : 'var(--surface-2)',
-                    color: v.status === 'ready' ? 'var(--success)' : v.status === 'processing' ? 'var(--accent)' : 'var(--text-muted)',
-                  }}>
-                    {v.status}
-                  </span>
-                </td>
-                <td style={{ padding: '12px 16px', color: 'var(--text-dim)' }}>
-                  {v.created}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text)', margin: 0 }}>
+          {strings?.recentVideos || 'All videos'}
+        </h2>
+        {hasActive && (
+          <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+            🔄 Live updating · {videos.filter((v) => v.status === 'processing' || v.status === 'queued').length} in progress
+          </span>
+        )}
       </div>
+
+      {videos.length === 0 ? (
+        <div style={{
+          padding: 60, textAlign: 'center',
+          background: 'var(--surface)', border: '2px dashed var(--border)',
+          borderRadius: 'var(--radius-lg)', color: 'var(--text-muted)',
+        }}>
+          🎬 No videos yet — click <strong>Produce now</strong> on an avatar to start
+        </div>
+      ) : (
+        <div style={{
+          background: 'var(--surface)',
+          border: '1px solid var(--border)',
+          borderRadius: 'var(--radius-lg)',
+          overflow: 'hidden',
+        }}>
+          {videos.map((v) => (
+            <VideoProgressRow key={v.id} video={v} tickMs={tickMs} />
+          ))}
+        </div>
+      )}
     </div>
   )
 }
