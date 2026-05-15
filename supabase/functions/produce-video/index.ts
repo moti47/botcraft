@@ -14,6 +14,7 @@
 
 import { serve } from "https://deno.land/std@0.168.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.38.0";
+import { precheck, spendCredits } from "../_shared/credits.ts";
 
 interface RequestBody {
   // For new video creation
@@ -169,6 +170,18 @@ serve(async (req: Request) => {
       });
     }
 
+    // Credit guard — the avatar's owner pays. Reject early if they're out.
+    if (avatar.user_id) {
+      const reason = await precheck(supabase, avatar.user_id, "video");
+      if (reason) {
+        return new Response(JSON.stringify({
+          error: "out_of_credits",
+          detail: reason,
+          hint: "Upgrade the plan or wait until next month's grant.",
+        }), { status: 402, headers: { "Content-Type": "application/json" } });
+      }
+    }
+
     const now = new Date().toISOString();
     const videoId = crypto.randomUUID();
 
@@ -187,6 +200,11 @@ serve(async (req: Request) => {
       return new Response(JSON.stringify({ error: insertError.message }), {
         status: 500, headers: { "Content-Type": "application/json" },
       });
+    }
+
+    // Charge the user (we already passed precheck above)
+    if (avatar.user_id) {
+      await spendCredits(supabase, avatar.user_id, "video", videoId, { topic });
     }
 
     // If no scheduled_for → run immediately

@@ -95,6 +95,42 @@ async function fetchPerformanceHistory(avatarId: string) {
   }));
 }
 
+/** Aggregate stats from the avatar_performance view. */
+async function fetchAvatarStats(avatarId: string) {
+  const { data } = await supabase
+    .from("avatar_performance")
+    .select("posted_count, avg_viral_score, avg_views, avg_retention_pct")
+    .eq("avatar_id", avatarId)
+    .maybeSingle();
+  return data || null;
+}
+
+/** Memories — user-supplied facts, file ingest chunks, command instructions. */
+async function fetchTopMemories(avatarId: string, limit = 12) {
+  const { data } = await supabase
+    .from("avatar_memory")
+    .select("kind, source, content, weight, created_at")
+    .eq("avatar_id", avatarId)
+    .order("weight", { ascending: false })
+    .order("created_at", { ascending: false })
+    .limit(limit);
+  return (data || []).map((m) => ({
+    kind: m.kind, source: m.source, content: String(m.content).slice(0, 400),
+  }));
+}
+
+/** Open commands the user wants applied to the NEXT video. */
+async function fetchPendingCommands(avatarId: string) {
+  const { data } = await supabase
+    .from("avatar_memory")
+    .select("content")
+    .eq("avatar_id", avatarId)
+    .eq("kind", "command")
+    .order("created_at", { ascending: false })
+    .limit(3);
+  return (data || []).map((c) => String(c.content));
+}
+
 // ─────────────────────────────────────────────────────────────
 // The Director's prompt
 // ─────────────────────────────────────────────────────────────
@@ -104,8 +140,11 @@ function buildDirectorPrompt(args: {
   userCommand?: string;
   performance: unknown[];
   viralRefs: unknown[];
+  stats?: Record<string, unknown> | null;
+  memories?: Array<{ kind: string; source: string; content: string }>;
+  pendingCommands?: string[];
 }): string {
-  const { avatar, topic, userCommand, performance, viralRefs } = args;
+  const { avatar, topic, userCommand, performance, viralRefs, stats, memories, pendingCommands } = args;
   const lang = String(avatar.language || "EN").toUpperCase();
   const langName = LANG_NAMES[lang] || "English";
   const blueprint = (avatar.production_blueprint || {}) as Record<string, unknown>;
@@ -130,13 +169,20 @@ ${JSON.stringify(blueprint, null, 2).slice(0, 1500)}
 ═══ TOPIC ═══
 ${topic}
 
-═══ PERFORMANCE HISTORY (what's worked before — lean into it) ═══
+═══ PERFORMANCE STATS (aggregate KPIs for this avatar) ═══
+${stats ? JSON.stringify(stats, null, 2) : "(brand new avatar — no posted videos yet)"}
+
+═══ RECENT VIDEOS (what's worked before — lean into it) ═══
 ${performance.length ? JSON.stringify(performance, null, 2) : "(no history yet — pick the highest-confidence hook)"}
+
+═══ AVATAR MEMORY (facts the user told us, file knowledge, preferences) ═══
+${(memories && memories.length) ? JSON.stringify(memories, null, 2).slice(0, 3000) : "(no memories saved)"}
 
 ═══ VIRAL REFERENCES from YouTube right now (study these vibes, don't copy) ═══
 ${viralRefs.length ? JSON.stringify(viralRefs, null, 2) : "(no fresh references available)"}
 
-${userCommand ? `═══ USER COMMAND (override priority — respect this above all) ═══\n"${userCommand}"\n` : ""}
+${(pendingCommands && pendingCommands.length) ? `═══ PENDING USER COMMANDS (apply ALL of these — they are unconsumed instructions) ═══\n${pendingCommands.map((c, i) => `${i + 1}. ${c}`).join("\n")}\n` : ""}
+${userCommand ? `═══ USER COMMAND for THIS video (override priority — respect this above all) ═══\n"${userCommand}"\n` : ""}
 
 ═══ TASK ═══
 Return STRICT JSON with this exact schema. Be specific, concrete, and opinionated.
@@ -322,13 +368,18 @@ serve(async (req: Request) => {
     const command = user_command || video.user_command;
 
     // Gather context in parallel
-    const [performance, viralRefs] = await Promise.all([
+    const [performance, viralRefs, stats, memories, pendingCommands] = await Promise.all([
       fetchPerformanceHistory(avatar.id),
       fetchViralReferences(avatar.niche),
+      fetchAvatarStats(avatar.id),
+      fetchTopMemories(avatar.id),
+      fetchPendingCommands(avatar.id),
     ]);
 
     // Build prompt + call director
-    const prompt = buildDirectorPrompt({ avatar, topic, userCommand: command, performance, viralRefs });
+    const prompt = buildDirectorPrompt({
+      avatar, topic, userCommand: command, performance, viralRefs, stats, memories, pendingCommands,
+    });
     const plan = (await callDirector(prompt)) || fallbackPlan(avatar, topic);
 
     // Save plan + viral_score
