@@ -198,6 +198,7 @@ serve(async (req: Request) => {
     const { error: insertError } = await supabase.from("videos").insert([{
       id: videoId,
       avatar_id,
+      user_id: avatar.user_id || null,   // explicit — RLS visibility depends on this
       topic: topic || null,
       status: "queued",
       scheduled_for,

@@ -79,6 +79,21 @@ export const useAvatars = () => {
  */
 export const useVideos = () => {
   const { data: avatars = [] } = useAvatars()
+  const queryClient = useQueryClient()
+
+  // Realtime: any insert/update on `videos` invalidates the cache so the
+  // Videos tab refreshes instantly when the pipeline moves a stage forward
+  // or a new produce-now lands.
+  React.useEffect(() => {
+    const channel = supabase
+      .channel('videos-live')
+      .on('postgres_changes',
+        { event: '*', schema: 'public', table: 'videos' },
+        () => queryClient.invalidateQueries({ queryKey: ['videos'] }),
+      )
+      .subscribe()
+    return () => { supabase.removeChannel(channel) }
+  }, [queryClient])
 
   return useQuery({
     queryKey: ['videos'],
