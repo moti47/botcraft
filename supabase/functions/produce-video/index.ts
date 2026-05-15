@@ -34,6 +34,13 @@ const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
 const supabase = createClient(SUPABASE_URL, SERVICE_KEY);
 
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Authorization, Content-Type, apikey, x-client-info",
+};
+const JSON_HEADERS = { ...CORS, "Content-Type": "application/json" };
+
 // ─────────────────────────────────────────────────────────────
 // On-demand trend lookup (no global cron — fetched per-video)
 // ─────────────────────────────────────────────────────────────
@@ -127,10 +134,13 @@ async function runPipeline(videoId: string) {
 // Main handler
 // ─────────────────────────────────────────────────────────────
 serve(async (req: Request) => {
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS });
+  }
   if (req.method !== "POST") {
     return new Response(JSON.stringify({ error: "Method not allowed" }), {
       status: 405,
-      headers: { "Content-Type": "application/json" },
+      headers: JSON_HEADERS,
     });
   }
 
@@ -142,7 +152,7 @@ serve(async (req: Request) => {
       const result = await runPipeline(body.video_id);
       return new Response(JSON.stringify(result), {
         status: 202,
-        headers: { "Content-Type": "application/json" },
+        headers: JSON_HEADERS,
       });
     }
 
@@ -154,7 +164,7 @@ serve(async (req: Request) => {
 
     if (!avatar_id) {
       return new Response(JSON.stringify({ error: "avatar_id required" }), {
-        status: 400, headers: { "Content-Type": "application/json" },
+        status: 400, headers: JSON_HEADERS,
       });
     }
 
@@ -166,7 +176,7 @@ serve(async (req: Request) => {
 
     if (avatarError || !avatar) {
       return new Response(JSON.stringify({ error: `avatar ${avatar_id} not found` }), {
-        status: 404, headers: { "Content-Type": "application/json" },
+        status: 404, headers: JSON_HEADERS,
       });
     }
 
@@ -178,7 +188,7 @@ serve(async (req: Request) => {
           error: "out_of_credits",
           detail: reason,
           hint: "Upgrade the plan or wait until next month's grant.",
-        }), { status: 402, headers: { "Content-Type": "application/json" } });
+        }), { status: 402, headers: JSON_HEADERS });
       }
     }
 
@@ -198,7 +208,7 @@ serve(async (req: Request) => {
 
     if (insertError) {
       return new Response(JSON.stringify({ error: insertError.message }), {
-        status: 500, headers: { "Content-Type": "application/json" },
+        status: 500, headers: JSON_HEADERS,
       });
     }
 
@@ -215,7 +225,7 @@ serve(async (req: Request) => {
         status: "processing",
         message: "Pipeline started",
       }), {
-        status: 202, headers: { "Content-Type": "application/json" },
+        status: 202, headers: JSON_HEADERS,
       });
     }
 
@@ -226,13 +236,13 @@ serve(async (req: Request) => {
       scheduled_for,
       message: `Will produce at ${scheduled_for}`,
     }), {
-      status: 202, headers: { "Content-Type": "application/json" },
+      status: 202, headers: JSON_HEADERS,
     });
 
   } catch (error) {
     console.error("produce-video error:", error);
     return new Response(JSON.stringify({ error: String(error) }), {
-      status: 500, headers: { "Content-Type": "application/json" },
+      status: 500, headers: JSON_HEADERS,
     });
   }
 });
