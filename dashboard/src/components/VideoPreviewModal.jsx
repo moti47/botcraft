@@ -12,10 +12,12 @@
  * Status flow: ready_for_review → posted (publish) | discarded (discard)
  */
 
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { supabase } from '../lib/api'
 import { usePublishVideo, useDiscardVideo, proxyImage } from '../BotCraftData'
+
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:54321/functions/v1'
 
 const PLATFORMS = [
   { id: 'yt', label: 'YouTube', icon: '▶️' },
@@ -46,58 +48,186 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
     },
   })
 
-  // Player state: browser SpeechSynthesis when voice_id starts with browser:,
-  // otherwise the regular <audio> element wired to audio_url. We track
-  // isPlaying ourselves so the play button reflects reality.
+  // ════════════════════════════════════════════════════════════
+  // Multi-scene player: walks through directors_plan.sections, cutting
+  // between the avatar's portrait and b-roll Pexels clips, while
+  // SpeechSynthesis reads the line for each section. Kinetic captions
+  // highlight the current word as TTS speaks.
+  // ════════════════════════════════════════════════════════════
   const [isPlaying, setIsPlaying] = useState(false)
-  const audioRef = React.useRef(null)
+  const [sceneIndex, setSceneIndex] = useState(0)
+  const [currentWord, setCurrentWord] = useState(0)         // highlighted word index within scene text
+  const [brollByQuery, setBrollByQuery] = useState({})       // cache: query → [{url}]
+  const audioRef = useRef(null)
+  const stopRequested = useRef(false)
+
   const voiceId = video?.avatars?.voice_id || ''
   const useBrowserTTS = voiceId.startsWith('browser:')
   const browserVoiceName = useBrowserTTS ? voiceId.slice('browser:'.length) : null
 
-  // Stop any playback when the modal closes
+  // Build the scene list from directors_plan (hook + sections + cta). If no
+  // plan, fall back to splitting the raw script into ~3 chunks.
+  const scenes = React.useMemo(() => {
+    if (!video) return []
+    const plan = video.directors_plan || {}
+    const out = []
+    if (plan.hook?.text) {
+      out.push({
+        kind: 'avatar',                  // hook = show the avatar (consistent face)
+        text: plan.hook.text,
+        broll_query: null,
+        emphasis: [],
+      })
+    }
+    for (const s of (plan.sections || [])) {
+      out.push({
+        kind: 'broll',                   // body = b-roll cuts
+        text: s.text || '',
+        broll_query: s.b_roll?.query || s.b_roll_query || null,
+        emphasis: s.emphasis_words || [],
+        overlay: (s.overlay_graphics || []).join(' · '),
+      })
+    }
+    if (plan.cta?.text) {
+      out.push({
+        kind: 'avatar',                  // CTA = avatar back on screen
+        text: plan.cta.text,
+        broll_query: null,
+        emphasis: [],
+      })
+    }
+    if (out.length === 0 && video.script) {
+      // No director plan — split script into ~3 chunks
+      const chunks = video.script.match(/[^.!?]+[.!?]+/g) || [video.script]
+      const groupSize = Math.ceil(chunks.length / 3)
+      for (let i = 0; i < chunks.length; i += groupSize) {
+        const text = chunks.slice(i, i + groupSize).join(' ').trim()
+        out.push({ kind: i === 0 ? 'avatar' : 'broll', text, broll_query: video.topic, emphasis: [] })
+      }
+    }
+    return out
+  }, [video])
+
+  // Pre-fetch b-roll clips for all scenes that need them. Cached by query.
+  const ensureBroll = useCallback(async (query) => {
+    if (!query) return null
+    if (brollByQuery[query]) return brollByQuery[query]
+    try {
+      const res = await fetch(`${API_URL}/fetch-broll`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query, count: 2, orientation: 'portrait' }),
+      })
+      const data = await res.json()
+      const clips = data.clips || []
+      setBrollByQuery((m) => ({ ...m, [query]: clips }))
+      return clips
+    } catch (err) {
+      console.error('b-roll fetch failed:', err)
+      return []
+    }
+  }, [brollByQuery])
+
+  // Stop everything when the modal closes
   useEffect(() => {
     if (!isOpen) {
+      stopRequested.current = true
       try { window.speechSynthesis?.cancel() } catch {/* ignore */}
       if (audioRef.current) { audioRef.current.pause(); audioRef.current.currentTime = 0 }
       setIsPlaying(false)
+      setSceneIndex(0)
+      setCurrentWord(0)
     }
   }, [isOpen])
 
-  const playVideo = () => {
+  // Speak one scene's text. Returns a promise that resolves when done.
+  const speakScene = useCallback((text) => {
+    return new Promise((resolve) => {
+      if (!text) return resolve()
+      if (useBrowserTTS && 'speechSynthesis' in window) {
+        const utter = new SpeechSynthesisUtterance(text)
+        const voices = window.speechSynthesis.getVoices()
+        const match = voices.find((v) => v.name === browserVoiceName)
+                || voices.find((v) => v.name.toLowerCase().includes((browserVoiceName || '').toLowerCase()))
+                || voices.find((v) => v.lang?.startsWith((video?.render_options?.language || 'en').toLowerCase().slice(0, 2)))
+                || null
+        if (match) utter.voice = match
+        utter.rate = 1.0
+        // Word-by-word highlighting via the boundary event
+        utter.onboundary = (ev) => {
+          if (ev.name === 'word') {
+            // Character index → word index
+            const upto = text.slice(0, ev.charIndex).trim().split(/\s+/).length
+            setCurrentWord(upto)
+          }
+        }
+        utter.onend = () => resolve()
+        utter.onerror = () => resolve()
+        window.speechSynthesis.cancel()
+        window.speechSynthesis.speak(utter)
+      } else if (video?.audio_url && audioRef.current) {
+        // External audio: just wait for its 'ended' event (one big audio file
+        // for the whole video). Per-scene cuts still happen visually based on
+        // an even time split.
+        const dur = audioRef.current.duration || 0
+        const sceneDur = scenes.length ? dur / scenes.length : 5
+        const wordCount = (text || '').trim().split(/\s+/).length || 1
+        const interval = (sceneDur * 1000) / wordCount
+        let wi = 0
+        const id = setInterval(() => {
+          wi += 1
+          setCurrentWord(wi)
+          if (wi >= wordCount) clearInterval(id)
+        }, interval)
+        if (sceneIndex === 0) audioRef.current.play().catch(() => resolve())
+        setTimeout(() => { clearInterval(id); resolve() }, sceneDur * 1000)
+      } else {
+        // No TTS available — fallback: estimate 2.7 words/sec
+        const wordCount = (text || '').trim().split(/\s+/).length || 1
+        const ms = (wordCount / 2.7) * 1000
+        let wi = 0
+        const id = setInterval(() => {
+          wi += 1
+          setCurrentWord(wi)
+          if (wi >= wordCount) clearInterval(id)
+        }, ms / wordCount)
+        setTimeout(() => { clearInterval(id); resolve() }, ms)
+      }
+    })
+  }, [useBrowserTTS, browserVoiceName, video, scenes.length, sceneIndex])
+
+  const playVideo = useCallback(async () => {
     if (isPlaying) {
-      // Stop
+      stopRequested.current = true
       try { window.speechSynthesis?.cancel() } catch {/* */}
       if (audioRef.current) audioRef.current.pause()
       setIsPlaying(false)
       return
     }
-    const text = (editedScript || video?.script || '').trim()
-    if (!text) return
+    if (scenes.length === 0) return
 
-    if (useBrowserTTS && 'speechSynthesis' in window) {
-      const utter = new SpeechSynthesisUtterance(text)
-      // Try to find the voice the avatar was configured with; fall back to any voice in same lang
-      const voices = window.speechSynthesis.getVoices()
-      const match = voices.find((v) => v.name === browserVoiceName)
-              || voices.find((v) => v.name.toLowerCase().includes((browserVoiceName || '').toLowerCase()))
-              || voices.find((v) => v.lang?.startsWith((video?.render_options?.language || 'en').toLowerCase()))
-              || null
-      if (match) utter.voice = match
-      utter.rate = 1.0
-      utter.onend = () => setIsPlaying(false)
-      utter.onerror = () => setIsPlaying(false)
-      window.speechSynthesis.cancel()
-      window.speechSynthesis.speak(utter)
-      setIsPlaying(true)
-    } else if (audioRef.current) {
-      audioRef.current.play().catch((err) => {
-        console.error('audio playback failed:', err)
-        setIsPlaying(false)
-      })
-      setIsPlaying(true)
+    // Warm up the speech synth voice list (Chrome quirk)
+    try { window.speechSynthesis?.getVoices() } catch {/* */}
+
+    // Pre-fetch b-roll for all scenes that need it
+    await Promise.all(scenes.filter((s) => s.broll_query).map((s) => ensureBroll(s.broll_query)))
+
+    stopRequested.current = false
+    setIsPlaying(true)
+    for (let i = 0; i < scenes.length; i++) {
+      if (stopRequested.current) break
+      setSceneIndex(i)
+      setCurrentWord(0)
+      await speakScene(scenes[i].text)
     }
-  }
+    setIsPlaying(false)
+    setSceneIndex(0)
+    setCurrentWord(0)
+  }, [isPlaying, scenes, ensureBroll, speakScene])
+
+  // The currently-on-screen scene
+  const scene = scenes[sceneIndex] || null
+  const sceneBrollClip = scene?.broll_query ? (brollByQuery[scene.broll_query]?.[0] || null) : null
 
   useEffect(() => {
     if (video?.script) setEditedScript(video.script)
@@ -250,13 +380,25 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
               <DirectorPlanCard plan={video.directors_plan} viralScore={video.viral_score} />
             )}
             <div style={{ display: 'grid', gridTemplateColumns: '280px 1fr', gap: '20px' }}>
-              {/* === Left: Player (thumbnail with overlay play button + audio) === */}
+              {/* === Left: Player (avatar shots intercut with b-roll, viral captions) === */}
               <div>
                 <style>{`
                   @keyframes kenBurnsZoom {
                     0%   { transform: scale(1.0)   translate(0,    0); }
                     50%  { transform: scale(1.06)  translate(-1%, -1%); }
                     100% { transform: scale(1.10)  translate(1%,   1%); }
+                  }
+                  @keyframes captionPop {
+                    0%   { transform: scale(0.85); opacity: 0; }
+                    50%  { transform: scale(1.08); }
+                    100% { transform: scale(1.00); opacity: 1; }
+                  }
+                  .vp-cap-word.active {
+                    background: #FBBF24;
+                    color: #000;
+                    padding: 2px 4px;
+                    border-radius: 4px;
+                    box-shadow: 0 0 12px rgba(251, 191, 36, 0.6);
                   }
                 `}</style>
                 <div
@@ -266,61 +408,166 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                     aspectRatio: '9/16',
                     borderRadius: 'var(--radius-md)',
                     overflow: 'hidden',
-                    background: 'var(--surface-2)',
+                    background: '#000',
                     border: '1px solid var(--border)',
                     position: 'relative',
                     marginBottom: 12,
                     cursor: 'pointer',
                   }}
                 >
-                  {/* The thumbnail image (animated like Ken Burns during playback) */}
-                  {video.thumbnail_url && (
+                  {/* === LAYER 1: avatar portrait (shown when scene.kind === 'avatar') === */}
+                  {isPlaying && scene?.kind === 'avatar' && video.avatars?.image_url && (
+                    <div
+                      key={`avatar-${sceneIndex}`}
+                      style={{
+                        position: 'absolute', inset: 0,
+                        backgroundImage: `url(${proxyImage(video.avatars.image_url)})`,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center',
+                        animation: 'kenBurnsZoom 6s ease-in-out infinite alternate',
+                      }}
+                    />
+                  )}
+
+                  {/* === LAYER 1b: b-roll Pexels video (shown when scene.kind === 'broll') === */}
+                  {isPlaying && scene?.kind === 'broll' && sceneBrollClip && (
+                    <video
+                      key={`broll-${sceneIndex}-${sceneBrollClip.url}`}
+                      src={sceneBrollClip.url}
+                      autoPlay muted loop playsInline
+                      style={{
+                        position: 'absolute', inset: 0,
+                        width: '100%', height: '100%',
+                        objectFit: 'cover',
+                      }}
+                    />
+                  )}
+                  {/* Fallback to avatar image if b-roll missing */}
+                  {isPlaying && scene?.kind === 'broll' && !sceneBrollClip && video.avatars?.image_url && (
+                    <div
+                      style={{
+                        position: 'absolute', inset: 0,
+                        backgroundImage: `url(${proxyImage(video.avatars.image_url)})`,
+                        backgroundSize: 'cover',
+                        backgroundPosition: 'center',
+                        animation: 'kenBurnsZoom 6s ease-in-out infinite alternate',
+                        filter: 'brightness(0.85)',
+                      }}
+                    />
+                  )}
+
+                  {/* === IDLE state: show thumbnail === */}
+                  {!isPlaying && video.thumbnail_url && (
                     <div
                       style={{
                         position: 'absolute', inset: 0,
                         backgroundImage: `url(${proxyImage(video.thumbnail_url)})`,
                         backgroundSize: 'cover',
                         backgroundPosition: 'center',
-                        animation: isPlaying ? 'kenBurnsZoom 12s ease-in-out infinite alternate' : 'none',
-                        transformOrigin: 'center',
                       }}
                     />
                   )}
-                  {/* Caption strip when playing — gives a "watching a video" feel */}
-                  {isPlaying && (
-                    <div style={{
-                      position: 'absolute', left: 0, right: 0, bottom: 0,
-                      padding: '14px 16px',
-                      background: 'linear-gradient(180deg, transparent, rgba(0,0,0,0.85))',
-                      color: '#fff', fontSize: 14, fontWeight: 700,
-                      lineHeight: 1.35,
-                      textShadow: '0 2px 6px rgba(0,0,0,0.7)',
-                    }}>
-                      {video.directors_plan?.hook?.text || video.topic}
+
+                  {/* === LAYER 2: viral kinetic captions (word-by-word highlight) === */}
+                  {isPlaying && scene && (
+                    <div
+                      key={`cap-${sceneIndex}`}
+                      style={{
+                        position: 'absolute', left: 0, right: 0, bottom: '8%',
+                        padding: '0 18px',
+                        textAlign: 'center',
+                        animation: 'captionPop 350ms cubic-bezier(0.22,1,0.36,1)',
+                        pointerEvents: 'none',
+                      }}
+                    >
+                      <div style={{
+                        display: 'inline-block',
+                        fontSize: 22, fontWeight: 900,
+                        lineHeight: 1.25,
+                        color: '#fff',
+                        textShadow: '0 0 8px rgba(0,0,0,1), 2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000',
+                        letterSpacing: '0.5px',
+                      }}>
+                        {scene.text.split(/\s+/).map((w, i) => (
+                          <span key={i} className={`vp-cap-word ${i === currentWord ? 'active' : ''}`} style={{ marginRight: 4 }}>
+                            {w}
+                          </span>
+                        ))}
+                      </div>
+                      {scene.overlay && (
+                        <div style={{
+                          marginTop: 8,
+                          display: 'inline-block',
+                          padding: '4px 10px',
+                          background: 'rgba(124,58,237,0.85)',
+                          color: '#fff', fontSize: 11, fontWeight: 700,
+                          borderRadius: 999,
+                          letterSpacing: 0.5,
+                        }}>
+                          {scene.overlay}
+                        </div>
+                      )}
                     </div>
                   )}
-                  {/* Big play / pause button overlay */}
-                  <div style={{
-                    position: 'absolute', inset: 0,
-                    display: 'flex', alignItems: 'center', justifyContent: 'center',
-                    background: isPlaying ? 'transparent' : 'rgba(0,0,0,0.25)',
-                    transition: 'background 200ms',
-                  }}>
+
+                  {/* === LAYER 3: hook text (only on first scene) === */}
+                  {isPlaying && sceneIndex === 0 && video.directors_plan?.hook?.text && (
                     <div style={{
-                      width: 64, height: 64,
-                      borderRadius: '50%',
-                      background: isPlaying ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.95)',
-                      color: isPlaying ? '#fff' : '#000',
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      fontSize: 28,
-                      boxShadow: '0 6px 24px rgba(0,0,0,0.4)',
-                      opacity: isPlaying ? 0.0 : 1.0,
-                      transition: 'opacity 200ms, background 200ms',
+                      position: 'absolute', left: 0, right: 0, top: '6%',
+                      textAlign: 'center', padding: '0 16px',
+                      pointerEvents: 'none',
                     }}>
-                      {isPlaying ? '⏸' : '▶'}
+                      <div style={{
+                        display: 'inline-block',
+                        padding: '6px 14px',
+                        background: 'rgba(251,191,36,0.92)',
+                        color: '#000', fontSize: 13, fontWeight: 900,
+                        letterSpacing: 1, textTransform: 'uppercase',
+                        boxShadow: '0 4px 14px rgba(0,0,0,0.5)',
+                        borderRadius: 4,
+                        transform: 'rotate(-2deg)',
+                      }}>
+                        🎬 {video.directors_plan?.title || video.topic}
+                      </div>
                     </div>
-                  </div>
-                  {!video.thumbnail_url && (
+                  )}
+
+                  {/* === LAYER 4: scene counter (top-right) === */}
+                  {isPlaying && scenes.length > 1 && (
+                    <div style={{
+                      position: 'absolute', top: 10, right: 10,
+                      padding: '3px 9px',
+                      background: 'rgba(0,0,0,0.6)',
+                      color: '#fff', fontSize: 10, fontWeight: 700,
+                      borderRadius: 999,
+                      pointerEvents: 'none',
+                    }}>
+                      {sceneIndex + 1} / {scenes.length}
+                    </div>
+                  )}
+
+                  {/* === Play / Pause overlay (idle state) === */}
+                  {!isPlaying && (
+                    <div style={{
+                      position: 'absolute', inset: 0,
+                      display: 'flex', alignItems: 'center', justifyContent: 'center',
+                      background: 'rgba(0,0,0,0.25)',
+                    }}>
+                      <div style={{
+                        width: 72, height: 72,
+                        borderRadius: '50%',
+                        background: 'rgba(255,255,255,0.95)',
+                        color: '#000',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        fontSize: 32,
+                        boxShadow: '0 6px 24px rgba(0,0,0,0.5)',
+                      }}>
+                        ▶
+                      </div>
+                    </div>
+                  )}
+
+                  {!video.thumbnail_url && !isPlaying && (
                     <div style={{
                       position: 'absolute', inset: 0,
                       display: 'flex', alignItems: 'center', justifyContent: 'center',

@@ -25,10 +25,13 @@ interface RequestBody {
   language?: string;
   scheduled_for?: string;  // ISO 8601; null = produce now
   user_command?: string;   // optional: "make it funnier", "emphasize the surprise"
+  length?: "short" | "medium" | "long";  // 30s, 60s, 90s default targets
 
   // For cron-driven execution
   video_id?: string;
 }
+
+const LENGTH_TO_SECONDS = { short: 35, medium: 60, long: 95 } as const;
 
 const SUPABASE_URL = Deno.env.get("SUPABASE_URL") || "";
 const SERVICE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") || "";
@@ -160,7 +163,9 @@ serve(async (req: Request) => {
     const {
       avatar_id, topic, voice = "auto", auto_post = false,
       language, scheduled_for = null, user_command = null,
+      length = "medium",
     } = body;
+    const target_length_sec = LENGTH_TO_SECONDS[length] ?? LENGTH_TO_SECONDS.medium;
 
     if (!avatar_id) {
       return new Response(JSON.stringify({ error: "avatar_id required" }), {
@@ -203,7 +208,10 @@ serve(async (req: Request) => {
       status: "queued",
       scheduled_for,
       user_command: user_command || null,
-      render_options: { voice, auto_post, language: language || avatar.language || "en" },
+      render_options: {
+        voice, auto_post, length, target_length_sec,
+        language: language || avatar.language || "en",
+      },
       created_at: now,
     }]);
 

@@ -238,7 +238,8 @@ No filler text. Each field must be intentional.
 }
 
 ═══ RULES ═══
-1. Total video length: aim for 30-55 seconds (sum all duration_sec).
+1. Total video length: aim for ${avatar.target_length_sec ? String(avatar.target_length_sec) + ' seconds' : '30-55 seconds'} (sum all duration_sec across hook+sections+cta).
+1b. Produce AT LEAST 4 sections so the editor has multiple b-roll cuts to work with (more for longer videos: ~1 section per 12 seconds of body).
 2. Hook MUST work in the first 3 seconds — assume the viewer is scrolling.
 3. Use the creator's tone (${avatar.tone}) and voice traits authentically.
 4. ${performance.length > 0 ? "Reference what's worked before — but innovate if scores are low." : "First video — go bold."}
@@ -376,9 +377,14 @@ serve(async (req: Request) => {
       fetchPendingCommands(avatar.id),
     ]);
 
+    // Pull the user's requested length onto the avatar object so the prompt
+    // can reference avatar.target_length_sec uniformly.
+    const targetLengthSec = (video.render_options as Record<string, unknown>)?.target_length_sec;
+    const avatarWithLen = { ...avatar, target_length_sec: targetLengthSec };
+
     // Build prompt + call director
     const prompt = buildDirectorPrompt({
-      avatar, topic, userCommand: command, performance, viralRefs, stats, memories, pendingCommands,
+      avatar: avatarWithLen, topic, userCommand: command, performance, viralRefs, stats, memories, pendingCommands,
     });
     const plan = (await callDirector(prompt)) || fallbackPlan(avatar, topic);
 
