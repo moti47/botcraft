@@ -497,6 +497,33 @@ serve(async (req: Request) => {
       });
     }
 
+    // Auto-pick a default voice. If a server-side ElevenLabs key is configured
+    // and you've called match-voices ahead of time, that wins. Otherwise we
+    // store a `browser:` voice tag chosen from the physical_description's
+    // gender + the language — the dashboard player resolves it to the
+    // closest installed SpeechSynthesis voice at play time.
+    const guessGender = /\b(she|her|woman|female|girl|lady)\b/i.test(story.physical_description)
+      ? 'female'
+      : /\b(he|him|man|male|boy|guy)\b/i.test(story.physical_description)
+      ? 'male'
+      : null;
+    const browserVoiceMap: Record<string, { female: string; male: string }> = {
+      EN: { female: "Google UK English Female", male:   "Google UK English Male" },
+      HE: { female: "Carmit",                   male:   "Carmit" },           // macOS HE default
+      ES: { female: "Google español",           male:   "Google español" },
+      FR: { female: "Google français",          male:   "Google français" },
+      DE: { female: "Google Deutsch",           male:   "Google Deutsch" },
+      PT: { female: "Google português do Brasil", male: "Google português do Brasil" },
+      IT: { female: "Google italiano",          male:   "Google italiano" },
+      AR: { female: "Maged",                    male:   "Maged" },
+      JA: { female: "Google 日本語",             male:   "Google 日本語" },
+      ZH: { female: "Google 普通话",             male:   "Google 普通话" },
+    };
+    const lang = (body.ui_language || body.language || "EN").toUpperCase();
+    const fallback = browserVoiceMap[lang] || browserVoiceMap.EN;
+    const defaultVoice = guessGender === 'male' ? fallback.male : fallback.female;
+    const auto_voice_id = `browser:${defaultVoice}`;
+
     // ── Save mode: insert into DB
     const admin = createClient(SUPABASE_URL, SERVICE_KEY);
     const { data: avatar, error: insertError } = await admin
@@ -519,6 +546,8 @@ serve(async (req: Request) => {
           custom_instructions: custom_instructions || undefined,
         },
         image_url,
+        voice_id: auto_voice_id,
+        voice_name: defaultVoice,
         is_active: true,
         is_paused: false,
       }])

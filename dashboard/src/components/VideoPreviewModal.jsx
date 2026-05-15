@@ -16,8 +16,34 @@ import React, { useState, useEffect, useRef, useCallback } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { supabase } from '../lib/api'
 import { usePublishVideo, useDiscardVideo, proxyImage } from '../BotCraftData'
+import { sfx } from '../lib/sfx'
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:54321/functions/v1'
+
+// Director's animation cue → CSS animation name we drive in the player.
+// Falls back to a tasteful default if the Director picks something we
+// haven't styled yet.
+const SCENE_ANIMATIONS = {
+  zoom_punch_in:     'sceneZoomPunch',
+  freeze_frame_pop:  'sceneFreezePop',
+  whip_pan:          'sceneWhipPan',
+  text_explode:      'sceneZoomPunch',
+  slow_dolly_in:     'sceneDollyIn',
+  slow_pan_right:    'scenePanRight',
+  slow_pan_left:     'scenePanLeft',
+  hard_cut_montage:  'sceneHardCut',
+  logo_pop:          'sceneFreezePop',
+  default:           'sceneDollyIn',
+}
+
+// Caption styles — Director can pick one per video; we apply the matching class.
+const CAPTION_STYLES = {
+  highlighted_word_yellow:  'cap-yellow',
+  kinetic_bouncing:         'cap-bouncy',
+  bold_outline:             'cap-bold-outline',
+  gradient_pop:             'cap-gradient',
+  none:                     '',
+}
 
 const PLATFORMS = [
   { id: 'yt', label: 'YouTube', icon: '▶️' },
@@ -140,6 +166,24 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
     }
   }, [isOpen])
 
+  // Track which b-roll clip within the section is currently shown. Long
+  // sections cycle through multiple Pexels clips at ~3.5s each so the
+  // viewer doesn't see the same loop the whole time.
+  const [clipCycle, setClipCycle] = useState(0)
+
+  // Cycle b-roll clips every ~3.5s while a multi-clip scene is on screen.
+  // Inlined the scene lookup so this can sit before `scene` is declared below.
+  useEffect(() => {
+    if (!isPlaying) return
+    const s = scenes[sceneIndex]
+    if (!s || s.kind !== 'broll') return
+    const clips = s.broll_query ? brollByQuery[s.broll_query] : null
+    if (!clips || clips.length < 2) return
+    setClipCycle(0)
+    const id = setInterval(() => setClipCycle((c) => (c + 1) % clips.length), 3500)
+    return () => clearInterval(id)
+  }, [isPlaying, sceneIndex, scenes, brollByQuery])
+
   // Speak one scene's text. Returns a promise that resolves when done.
   const speakScene = useCallback((text) => {
     return new Promise((resolve) => {
@@ -227,7 +271,30 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
 
   // The currently-on-screen scene
   const scene = scenes[sceneIndex] || null
-  const sceneBrollClip = scene?.broll_query ? (brollByQuery[scene.broll_query]?.[0] || null) : null
+  const sceneBrollClips = scene?.broll_query ? (brollByQuery[scene.broll_query] || []) : []
+  const sceneBrollClip = sceneBrollClips[clipCycle % Math.max(1, sceneBrollClips.length)] || null
+
+  // Trigger SFX on scene change + word boundaries
+  useEffect(() => {
+    if (!isPlaying || !scene) return
+    if (sceneIndex === 0) sfx.thump()        // hook punch-in
+    else if (scene.kind === 'avatar') sfx.ding()  // CTA arrival
+    else sfx.whoosh()                         // body scene swap
+  }, [sceneIndex, isPlaying])
+
+  // Pop on each highlighted word — gives the captions rhythm
+  useEffect(() => {
+    if (!isPlaying || currentWord === 0) return
+    sfx.pop()
+  }, [currentWord, isPlaying])
+
+  // Director's chosen styles for this video
+  const sceneAnimation = SCENE_ANIMATIONS[
+    scene?.animation || video?.directors_plan?.hook?.animation || 'default'
+  ] || SCENE_ANIMATIONS.default
+  const captionClass = CAPTION_STYLES[
+    video?.directors_plan?.hook?.captions_style || 'highlighted_word_yellow'
+  ] || 'cap-yellow'
 
   useEffect(() => {
     if (video?.script) setEditedScript(video.script)
@@ -388,17 +455,92 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                     50%  { transform: scale(1.06)  translate(-1%, -1%); }
                     100% { transform: scale(1.10)  translate(1%,   1%); }
                   }
-                  @keyframes captionPop {
-                    0%   { transform: scale(0.85); opacity: 0; }
-                    50%  { transform: scale(1.08); }
+                  @keyframes sceneZoomPunch {
+                    0%   { transform: scale(1.25); opacity: 0; }
+                    60%  { transform: scale(0.98); opacity: 1; }
+                    100% { transform: scale(1.00); }
+                  }
+                  @keyframes sceneFreezePop {
+                    0%   { transform: scale(0.85) rotate(-2deg); opacity: 0; }
+                    100% { transform: scale(1.00) rotate(0);     opacity: 1; }
+                  }
+                  @keyframes sceneWhipPan {
+                    0%   { transform: translateX(50%) skewX(-15deg); opacity: 0; filter: blur(8px); }
+                    60%  { transform: translateX(-3%) skewX(2deg);   opacity: 1; filter: blur(0); }
+                    100% { transform: translateX(0)   skewX(0);      opacity: 1; }
+                  }
+                  @keyframes sceneDollyIn {
+                    0%   { transform: scale(1.15); opacity: 0; }
                     100% { transform: scale(1.00); opacity: 1; }
                   }
-                  .vp-cap-word.active {
-                    background: #FBBF24;
-                    color: #000;
-                    padding: 2px 4px;
-                    border-radius: 4px;
-                    box-shadow: 0 0 12px rgba(251, 191, 36, 0.6);
+                  @keyframes scenePanRight {
+                    0%   { transform: translateX(-6%) scale(1.08); opacity: 0; }
+                    100% { transform: translateX(0)   scale(1.08); opacity: 1; }
+                  }
+                  @keyframes scenePanLeft {
+                    0%   { transform: translateX(6%)  scale(1.08); opacity: 0; }
+                    100% { transform: translateX(0)   scale(1.08); opacity: 1; }
+                  }
+                  @keyframes sceneHardCut {
+                    0%   { filter: brightness(2.2); }
+                    20%  { filter: brightness(1.0); }
+                    100% { filter: brightness(1.0); }
+                  }
+                  @keyframes captionDrop {
+                    0%   { transform: translateY(20px) scale(0.9); opacity: 0; }
+                    60%  { transform: translateY(-3px) scale(1.04); }
+                    100% { transform: translateY(0)    scale(1.0); opacity: 1; }
+                  }
+                  @keyframes wordPop {
+                    0%   { transform: scale(0.7);  }
+                    60%  { transform: scale(1.18); }
+                    100% { transform: scale(1.00); }
+                  }
+                  @keyframes overlaySlide {
+                    0%   { transform: translateY(60px) rotate(-3deg); opacity: 0; }
+                    100% { transform: translateY(0)    rotate(-3deg); opacity: 1; }
+                  }
+                  @keyframes hookBadgeWiggle {
+                    0%, 100% { transform: rotate(-2deg) scale(1.0); }
+                    50%      { transform: rotate(-4deg) scale(1.05); }
+                  }
+                  /* Caption text styling — kinetic by default */
+                  .vp-cap-word {
+                    display: inline-block;
+                    margin: 0 3px;
+                    transition: transform 120ms ease-out;
+                  }
+                  .cap-yellow .vp-cap-word.active {
+                    background: #FBBF24; color: #000;
+                    padding: 2px 6px; border-radius: 5px;
+                    box-shadow: 0 0 14px rgba(251,191,36,0.7), 0 2px 4px rgba(0,0,0,0.5);
+                    animation: wordPop 220ms cubic-bezier(0.22,1,0.36,1);
+                  }
+                  .cap-bouncy .vp-cap-word.active {
+                    color: #FBBF24;
+                    text-shadow: 3px 3px 0 #000, 0 0 20px rgba(251,191,36,0.8);
+                    animation: wordPop 260ms cubic-bezier(0.34,1.56,0.64,1);
+                    transform: scale(1.15);
+                  }
+                  .cap-bold-outline .vp-cap-word.active {
+                    color: #fff;
+                    -webkit-text-stroke: 2px #FBBF24;
+                    text-shadow: 0 0 18px #FBBF24;
+                    transform: scale(1.1);
+                  }
+                  .cap-gradient .vp-cap-word.active {
+                    background: linear-gradient(135deg, #FBBF24, #EF4444);
+                    -webkit-background-clip: text;
+                    background-clip: text;
+                    color: transparent;
+                    transform: scale(1.2);
+                    text-shadow: none;
+                    filter: drop-shadow(0 0 12px rgba(251,191,36,0.7));
+                  }
+                  /* Animated b-roll/avatar pan */
+                  .vp-scene-layer {
+                    position: absolute; inset: 0;
+                    background-size: cover; background-position: center;
                   }
                 `}</style>
                 <div
@@ -419,41 +561,46 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                   {isPlaying && scene?.kind === 'avatar' && video.avatars?.image_url && (
                     <div
                       key={`avatar-${sceneIndex}`}
+                      className="vp-scene-layer"
                       style={{
-                        position: 'absolute', inset: 0,
                         backgroundImage: `url(${proxyImage(video.avatars.image_url)})`,
-                        backgroundSize: 'cover',
-                        backgroundPosition: 'center',
-                        animation: 'kenBurnsZoom 6s ease-in-out infinite alternate',
+                        animation: `${sceneAnimation} 700ms cubic-bezier(0.22,1,0.36,1), kenBurnsZoom 8s 700ms ease-in-out infinite alternate`,
                       }}
                     />
                   )}
 
-                  {/* === LAYER 1b: b-roll Pexels video (shown when scene.kind === 'broll') === */}
+                  {/* === LAYER 1b: b-roll Pexels video — cycles through clips === */}
                   {isPlaying && scene?.kind === 'broll' && sceneBrollClip && (
                     <video
-                      key={`broll-${sceneIndex}-${sceneBrollClip.url}`}
+                      key={`broll-${sceneIndex}-${clipCycle}-${sceneBrollClip.url}`}
                       src={sceneBrollClip.url}
                       autoPlay muted loop playsInline
                       style={{
                         position: 'absolute', inset: 0,
                         width: '100%', height: '100%',
                         objectFit: 'cover',
+                        animation: `${sceneAnimation} 700ms cubic-bezier(0.22,1,0.36,1)`,
                       }}
                     />
                   )}
                   {/* Fallback to avatar image if b-roll missing */}
                   {isPlaying && scene?.kind === 'broll' && !sceneBrollClip && video.avatars?.image_url && (
                     <div
+                      className="vp-scene-layer"
                       style={{
-                        position: 'absolute', inset: 0,
                         backgroundImage: `url(${proxyImage(video.avatars.image_url)})`,
-                        backgroundSize: 'cover',
-                        backgroundPosition: 'center',
-                        animation: 'kenBurnsZoom 6s ease-in-out infinite alternate',
+                        animation: `${sceneAnimation} 700ms cubic-bezier(0.22,1,0.36,1), kenBurnsZoom 8s 700ms ease-in-out infinite alternate`,
                         filter: 'brightness(0.85)',
                       }}
                     />
+                  )}
+
+                  {/* Dark vignette so captions pop over busy b-roll */}
+                  {isPlaying && (
+                    <div style={{
+                      position: 'absolute', inset: 0, pointerEvents: 'none',
+                      background: 'radial-gradient(ellipse at center, transparent 45%, rgba(0,0,0,0.55) 100%)',
+                    }} />
                   )}
 
                   {/* === IDLE state: show thumbnail === */}
@@ -472,37 +619,43 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                   {isPlaying && scene && (
                     <div
                       key={`cap-${sceneIndex}`}
+                      className={captionClass}
                       style={{
-                        position: 'absolute', left: 0, right: 0, bottom: '8%',
-                        padding: '0 18px',
+                        position: 'absolute', left: 0, right: 0, bottom: '10%',
+                        padding: '0 22px',
                         textAlign: 'center',
-                        animation: 'captionPop 350ms cubic-bezier(0.22,1,0.36,1)',
+                        animation: 'captionDrop 420ms cubic-bezier(0.22,1,0.36,1)',
                         pointerEvents: 'none',
                       }}
                     >
                       <div style={{
                         display: 'inline-block',
-                        fontSize: 22, fontWeight: 900,
-                        lineHeight: 1.25,
+                        fontSize: 26, fontWeight: 900,
+                        lineHeight: 1.2,
                         color: '#fff',
-                        textShadow: '0 0 8px rgba(0,0,0,1), 2px 2px 0 #000, -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000',
+                        textShadow: '3px 3px 0 #000, -3px 3px 0 #000, 3px -3px 0 #000, -3px -3px 0 #000, 0 0 12px rgba(0,0,0,0.8)',
                         letterSpacing: '0.5px',
+                        maxWidth: '92%',
                       }}>
                         {scene.text.split(/\s+/).map((w, i) => (
-                          <span key={i} className={`vp-cap-word ${i === currentWord ? 'active' : ''}`} style={{ marginRight: 4 }}>
+                          <span key={i} className={`vp-cap-word ${i === currentWord ? 'active' : ''}`}>
                             {w}
                           </span>
                         ))}
                       </div>
                       {scene.overlay && (
                         <div style={{
-                          marginTop: 8,
+                          marginTop: 12,
                           display: 'inline-block',
-                          padding: '4px 10px',
-                          background: 'rgba(124,58,237,0.85)',
-                          color: '#fff', fontSize: 11, fontWeight: 700,
+                          padding: '6px 14px',
+                          background: 'linear-gradient(135deg, #7C3AED, #06B6D4)',
+                          color: '#fff', fontSize: 13, fontWeight: 800,
                           borderRadius: 999,
                           letterSpacing: 0.5,
+                          textShadow: '0 1px 2px rgba(0,0,0,0.4)',
+                          boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
+                          animation: 'overlaySlide 450ms cubic-bezier(0.22,1,0.36,1)',
+                          transform: 'rotate(-3deg)',
                         }}>
                           {scene.overlay}
                         </div>
@@ -511,21 +664,21 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                   )}
 
                   {/* === LAYER 3: hook text (only on first scene) === */}
-                  {isPlaying && sceneIndex === 0 && video.directors_plan?.hook?.text && (
+                  {isPlaying && sceneIndex === 0 && (video.directors_plan?.title || video.topic) && (
                     <div style={{
-                      position: 'absolute', left: 0, right: 0, top: '6%',
+                      position: 'absolute', left: 0, right: 0, top: '7%',
                       textAlign: 'center', padding: '0 16px',
                       pointerEvents: 'none',
                     }}>
                       <div style={{
                         display: 'inline-block',
-                        padding: '6px 14px',
-                        background: 'rgba(251,191,36,0.92)',
-                        color: '#000', fontSize: 13, fontWeight: 900,
-                        letterSpacing: 1, textTransform: 'uppercase',
-                        boxShadow: '0 4px 14px rgba(0,0,0,0.5)',
-                        borderRadius: 4,
-                        transform: 'rotate(-2deg)',
+                        padding: '7px 16px',
+                        background: 'rgba(251,191,36,0.95)',
+                        color: '#000', fontSize: 14, fontWeight: 900,
+                        letterSpacing: 1.2, textTransform: 'uppercase',
+                        boxShadow: '0 6px 18px rgba(0,0,0,0.55)',
+                        borderRadius: 5,
+                        animation: 'hookBadgeWiggle 2.4s ease-in-out infinite',
                       }}>
                         🎬 {video.directors_plan?.title || video.topic}
                       </div>
@@ -647,8 +800,40 @@ export const VideoPreviewModal = ({ videoId, isOpen, onClose }) => {
                   </div>
                 </div>
 
-                {/* Script */}
-                <div style={{ marginBottom: 16 }}>
+                {/* Scenes editor — edit per-section text + swap b-roll */}
+                {!isPosted && scenes.length > 0 && (
+                  <ScenesEditor
+                    video={video}
+                    scenes={scenes}
+                    onSave={async (newSections, newScript) => {
+                      const newPlan = { ...(video.directors_plan || {}), sections: newSections }
+                      await supabase
+                        .from('videos')
+                        .update({
+                          directors_plan: newPlan,
+                          script: newScript,
+                          updated_at: new Date().toISOString(),
+                        })
+                        .eq('id', videoId)
+                      setEditedScript(newScript)
+                      refetch()
+                    }}
+                    onSwapBroll={(sceneIdx) => {
+                      const s = scenes[sceneIdx]
+                      if (!s?.broll_query) return
+                      const clips = brollByQuery[s.broll_query] || []
+                      // cycle to next clip in our cache, or refetch with a fresh count
+                      if (clips.length >= 2) {
+                        setClipCycle((c) => (c + 1) % clips.length)
+                      } else {
+                        ensureBroll(s.broll_query + ' alt')
+                      }
+                    }}
+                  />
+                )}
+
+                {/* Script (full text, kept for posted videos) */}
+                <div style={{ marginBottom: 16, display: isPosted ? 'block' : 'none' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
                     <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
                       Script {!isPosted && '(editable)'}
@@ -980,5 +1165,146 @@ const PlanCell = ({ label, value, sub }) => (
     )}
   </div>
 )
+
+// ════════════════════════════════════════════════════════════
+// ScenesEditor — compact per-section text editor + b-roll swap
+// ════════════════════════════════════════════════════════════
+function ScenesEditor({ video, scenes, onSave, onSwapBroll }) {
+  // Local editable copy keyed off the plan's sections (skip hook/cta avatar scenes)
+  const planSections = video?.directors_plan?.sections || []
+  const [edited, setEdited] = React.useState(() => planSections.map((s) => ({ ...s })))
+  const [saving, setSaving] = React.useState(false)
+  const [dirty, setDirty] = React.useState(false)
+
+  React.useEffect(() => {
+    setEdited(planSections.map((s) => ({ ...s })))
+    setDirty(false)
+  }, [video?.id])
+
+  if (planSections.length === 0) return null
+
+  const updateField = (i, field, value) => {
+    setEdited((rows) => rows.map((r, idx) => (idx === i ? { ...r, [field]: value } : r)))
+    setDirty(true)
+  }
+
+  const updateBrollQuery = (i, query) => {
+    setEdited((rows) =>
+      rows.map((r, idx) => (idx === i ? { ...r, b_roll: { ...(r.b_roll || {}), query } } : r))
+    )
+    setDirty(true)
+  }
+
+  const handleSave = async () => {
+    setSaving(true)
+    try {
+      // Rebuild the spoken script from hook + edited sections + cta
+      const hook = video.directors_plan?.hook?.text || ''
+      const cta = video.directors_plan?.cta?.text || ''
+      const newScript = [hook, ...edited.map((s) => s.text || ''), cta].filter(Boolean).join(' ')
+      await onSave(edited, newScript)
+      setDirty(false)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  // The b-roll scenes in the player correspond to plan sections, offset by
+  // the leading hook scene (which is an 'avatar' scene). So plan section i
+  // is player scene (i + 1). We pass that to onSwapBroll.
+  const playerSceneIndexFor = (i) => i + (video?.directors_plan?.hook ? 1 : 0)
+
+  return (
+    <div style={{ marginBottom: 16 }}>
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6,
+      }}>
+        <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: 0.5 }}>
+          🎬 Scenes ({edited.length})
+        </div>
+        {dirty && (
+          <button
+            onClick={handleSave}
+            disabled={saving}
+            style={{
+              padding: '4px 12px',
+              fontSize: 10, fontWeight: 700,
+              background: 'var(--brand-gradient)', color: '#fff',
+              border: 'none', borderRadius: 999,
+              cursor: saving ? 'wait' : 'pointer',
+              boxShadow: '0 2px 8px rgba(124,58,237,0.4)',
+            }}
+          >
+            {saving ? '⏳ Saving...' : '💾 Save scenes'}
+          </button>
+        )}
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+        {edited.map((s, i) => (
+          <div key={i} style={{
+            padding: 10,
+            background: 'var(--surface)',
+            border: '1px solid var(--border)',
+            borderRadius: 'var(--radius-sm)',
+            display: 'grid', gridTemplateColumns: '24px 1fr', gap: 10,
+          }}>
+            <div style={{
+              width: 24, height: 24,
+              borderRadius: 999,
+              background: 'var(--brand-gradient)', color: '#fff',
+              fontSize: 11, fontWeight: 800,
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+            }}>{i + 1}</div>
+            <div>
+              <textarea
+                value={s.text || ''}
+                onChange={(e) => updateField(i, 'text', e.target.value)}
+                rows={2}
+                style={{
+                  width: '100%', boxSizing: 'border-box',
+                  padding: '6px 8px', fontSize: 12,
+                  background: 'var(--surface-2)', color: 'var(--text)',
+                  border: '1px solid var(--border)',
+                  borderRadius: 'var(--radius-sm)', resize: 'vertical',
+                  fontFamily: 'inherit', lineHeight: 1.4,
+                }}
+              />
+              <div style={{ display: 'flex', gap: 6, marginTop: 6, alignItems: 'center' }}>
+                <span style={{ fontSize: 10, color: 'var(--text-dim)', whiteSpace: 'nowrap' }}>📹 B-roll:</span>
+                <input
+                  type="text"
+                  value={s.b_roll?.query || ''}
+                  onChange={(e) => updateBrollQuery(i, e.target.value)}
+                  placeholder="search query (English)"
+                  style={{
+                    flex: 1,
+                    padding: '4px 8px', fontSize: 11,
+                    background: 'var(--surface-2)', color: 'var(--text)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)',
+                  }}
+                />
+                <button
+                  type="button"
+                  onClick={() => onSwapBroll?.(playerSceneIndexFor(i))}
+                  title="Swap to the next available clip for this query"
+                  style={{
+                    padding: '4px 10px', fontSize: 10, fontWeight: 700,
+                    background: 'var(--surface-2)', color: 'var(--text)',
+                    border: '1px solid var(--border)',
+                    borderRadius: 'var(--radius-sm)', cursor: 'pointer',
+                  }}
+                >
+                  🔄
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 export default VideoPreviewModal
