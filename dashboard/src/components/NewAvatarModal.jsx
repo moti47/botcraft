@@ -308,7 +308,7 @@ export const NewAvatarModal = ({ isOpen, onClose, onSuccess, uiLanguage = 'EN' }
               border: '1px solid var(--border)',
               overflow: 'hidden',
               position: 'relative',
-              boxShadow: preview?.image_url ? 'var(--shadow-md)' : 'none',
+              boxShadow: imageUrl ? 'var(--shadow-md)' : 'none',
             }}>
               {imageUrl ? (
                 <PreviewImage src={proxyImage(imageUrl)} />
